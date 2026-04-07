@@ -63,6 +63,15 @@ type Config struct {
 	MaxGRPCRetries         uint32        `mapstructure:"max_grpc_retries"`
 	MaxRPCMsgSize          int           `mapstructure:"max_rpc_msg_size"`
 	ErrorMode              ErrorMode     `mapstructure:"error_mode"`
+
+	// TargetPID 指定要采集的目标进程 PID，0 表示采集所有进程。
+	TargetPID              int           `mapstructure:"target_pid"`
+	// Duration 指定采样持续时间，到达后自动停止并输出结果。
+	Duration               time.Duration `mapstructure:"duration"`
+	// OutputFile 指定采样结果输出文件路径。
+	OutputFile             string        `mapstructure:"output_file"`
+	// FileType 指定输出文件格式类型，支持 "folded"（默认）、"jfr" 和 "pprof"。
+	FileType               string        `mapstructure:"file_type"`
 }
 
 // Validate validates the config.
@@ -137,6 +146,20 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("host Agent requires kernel version "+
 				"%d.%d or newer but got %d.%d.%d", minMajor, minMinor, major, minor, patch)
 		}
+	}
+
+	// 校验定时采样模式参数
+	if cfg.TargetPID < 0 {
+		return fmt.Errorf("invalid target PID: %d, must be >= 0", cfg.TargetPID)
+	}
+	if cfg.Duration < 0 {
+		return fmt.Errorf("invalid duration: %v, must be >= 0", cfg.Duration)
+	}
+	if cfg.Duration > 0 && cfg.OutputFile == "" {
+		return errors.New("当指定了 -duration 时，必须同时指定 -output 输出文件路径")
+	}
+	if cfg.OutputFile != "" && cfg.Duration == 0 {
+		return errors.New("当指定了 -output 时，必须同时指定 -duration 采样持续时间")
 	}
 
 	return nil

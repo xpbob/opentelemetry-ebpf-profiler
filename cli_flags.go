@@ -31,6 +31,11 @@ const (
 
 	// This is the X in 2^(n + x) where n is the default hardcoded map size value
 	defaultArgMapScaleFactor = 0
+
+	defaultTargetPID  = 0
+	defaultDuration   = 0
+	defaultOutputFile = ""
+	defaultFileType   = "folded"
 )
 
 // Help strings for command line arguments
@@ -80,6 +85,14 @@ var (
 		"Expected format: probe_type:target[:symbol]. probe_type can be kprobe, kretprobe, uprobe, or uretprobe."
 	loadProbeHelper = "Load generic eBPF program that can be attached externally to " +
 		"various user or kernel space hooks."
+	targetPIDHelp  = "Target process PID to profile. 0 means profile all processes."
+	durationHelp   = "Profiling duration (e.g. 30s, 5m). After this duration, the agent " +
+		"will automatically stop and write the output file."
+	outputFileHelp = "Output file path for profiling results (protobuf format). " +
+		"Required when -duration is set."
+	fileTypeHelp = "Output file format type. Supported values: 'folded' (default, for flamegraph.pl), " +
+		"'jfr' (JDK Flight Recorder format, for JMC or jfr tool), " +
+		"and 'pprof' (pprof format, for go tool pprof or pprof CLI)."
 )
 
 // Package-scope variable, so that conditionally compiled other components can refer
@@ -147,6 +160,11 @@ func parseArgs() (*controller.Config, error) {
 	})
 
 	fs.BoolVar(&args.LoadProbe, "load-probe", false, loadProbeHelper)
+
+	fs.IntVar(&args.TargetPID, "pid", defaultTargetPID, targetPIDHelp)
+	fs.DurationVar(&args.Duration, "duration", defaultDuration, durationHelp)
+	fs.StringVar(&args.OutputFile, "output", defaultOutputFile, outputFileHelp)
+	fs.StringVar(&args.FileType, "file-type", defaultFileType, fileTypeHelp)
 
 	fs.Usage = func() {
 		fs.PrintDefaults()
