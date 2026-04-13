@@ -365,6 +365,7 @@ typedef enum TraceOrigin {
   TRACE_SAMPLING,
   TRACE_OFF_CPU,
   TRACE_PROBE,
+  TRACE_CUDA,
 } TraceOrigin;
 
 // Maximum number of unique stack deltas needed on a system. This is based on
@@ -828,6 +829,10 @@ typedef struct PerCPURecord {
 
   // ratelimitAction determines the PID event rate limiting mode
   u8 ratelimitAction;
+
+  // cuda_name_ptr 用于在 USDT 入口和 unwind_stop 之间传递 CUDA kernel name 的用户态指针。
+  // 该字段不会被 get_pristine_per_cpu_record() 清零。
+  u64 cuda_name_ptr;
 } PerCPURecord;
 
 // https://github.com/torvalds/linux/blob/e9a6fb0bcdd7609be6969112f3fbfcce3b1d4a7c/include/linux/percpu.h#L24C39-L24C47

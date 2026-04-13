@@ -72,6 +72,11 @@ type Config struct {
 	OutputFile             string        `mapstructure:"output_file"`
 	// FileType 指定输出文件格式类型，支持 "folded"（默认）、"jfr" 和 "pprof"。
 	FileType               string        `mapstructure:"file_type"`
+	// EnableCuda 开启 CUDA USDT 探针采集，需要 Linux 5.4+ 内核。
+	EnableCuda             bool          `mapstructure:"enable_cuda"`
+	// CudaBinary 指定包含 USDT 探针的二进制文件路径（如共享库 .so）。
+	// 若为空，则默认使用 /proc/<pid>/exe。
+	CudaBinary             string        `mapstructure:"cuda_binary"`
 }
 
 // Validate validates the config.

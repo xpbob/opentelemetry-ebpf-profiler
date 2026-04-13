@@ -93,6 +93,10 @@ var (
 	fileTypeHelp = "Output file format type. Supported values: 'folded' (default, for flamegraph.pl), " +
 		"'jfr' (JDK Flight Recorder format, for JMC or jfr tool), " +
 		"and 'pprof' (pprof format, for go tool pprof or pprof CLI)."
+	enableCudaHelp = "Enable CUDA USDT probe for GPU kernel correlation. " +
+		"Requires Linux 5.4+ kernel. Only effective in CPU sampling mode."
+	cudaBinaryHelp = "Path to the binary (e.g. shared library .so) containing the USDT probe " +
+		"parcagpu:cuda_correlation. If not specified, defaults to /proc/<pid>/exe."
 )
 
 // Package-scope variable, so that conditionally compiled other components can refer
@@ -165,6 +169,9 @@ func parseArgs() (*controller.Config, error) {
 	fs.DurationVar(&args.Duration, "duration", defaultDuration, durationHelp)
 	fs.StringVar(&args.OutputFile, "output", defaultOutputFile, outputFileHelp)
 	fs.StringVar(&args.FileType, "file-type", defaultFileType, fileTypeHelp)
+
+	fs.BoolVar(&args.EnableCuda, "enable-cuda", false, enableCudaHelp)
+	fs.StringVar(&args.CudaBinary, "cuda-binary", "", cudaBinaryHelp)
 
 	fs.Usage = func() {
 		fs.PrintDefaults()

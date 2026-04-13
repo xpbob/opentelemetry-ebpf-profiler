@@ -97,6 +97,7 @@ func (p *Pdata) Generate(tree samples.TraceEventsTree,
 			support.TraceOriginSampling,
 			support.TraceOriginOffCPU,
 			support.TraceOriginProbe,
+			support.TraceOriginCuda,
 		} {
 			if len(toEvents.Events[origin]) == 0 {
 				// Do not append empty profiles.
@@ -166,6 +167,9 @@ func (p *Pdata) setProfile(
 		st.SetUnitStrindex(stringSet.Add("nanoseconds"))
 	case support.TraceOriginProbe:
 		st.SetTypeStrindex(stringSet.Add("events"))
+		st.SetUnitStrindex(stringSet.Add("count"))
+	case support.TraceOriginCuda:
+		st.SetTypeStrindex(stringSet.Add("cuda_events"))
 		st.SetUnitStrindex(stringSet.Add("count"))
 	default:
 		// Should never happen

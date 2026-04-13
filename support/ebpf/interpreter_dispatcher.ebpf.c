@@ -237,6 +237,56 @@ static EBPF_INLINE void maybe_add_apm_info(Trace *trace)
     corr_buf.trace_flags);
 }
 
+// maybe_add_cuda_labels 在 unwind_stop 中检查 trace 是否来自 CUDA USDT 探针，
+// 如果是则从 per-CPU record 的 cuda_name_ptr 读取 CUDA kernel name，
+// 并填入 trace 的 custom_labels。
+static EBPF_INLINE void maybe_add_cuda_labels(PerCPURecord *record)
+{
+  Trace *trace = &record->trace;
+  if (trace->origin != TRACE_CUDA) {
+    return;
+  }
+
+  u64 name_ptr = record->cuda_name_ptr;
+  if (name_ptr == 0) {
+    return;
+  }
+
+  // 清零 cuda_name_ptr，避免后续非 CUDA trace 误读
+  record->cuda_name_ptr = 0;
+
+  CustomLabelsArray *labels = &trace->custom_labels;
+  // 确保不超过 MAX_CUSTOM_LABELS
+  if (labels->len >= MAX_CUSTOM_LABELS) {
+    return;
+  }
+
+  u32 idx = labels->len;
+  // 边界检查，满足 verifier
+  if (idx >= MAX_CUSTOM_LABELS) {
+    return;
+  }
+
+  // key = "cuda_name"
+  __builtin_memset(labels->labels[idx].key, 0, sizeof(labels->labels[idx].key));
+  labels->labels[idx].key[0] = 'c';
+  labels->labels[idx].key[1] = 'u';
+  labels->labels[idx].key[2] = 'd';
+  labels->labels[idx].key[3] = 'a';
+  labels->labels[idx].key[4] = '_';
+  labels->labels[idx].key[5] = 'n';
+  labels->labels[idx].key[6] = 'a';
+  labels->labels[idx].key[7] = 'm';
+  labels->labels[idx].key[8] = 'e';
+
+  // 从用户空间读取 name 字符串
+  __builtin_memset(labels->labels[idx].val, 0, sizeof(labels->labels[idx].val));
+  bpf_probe_read_user(labels->labels[idx].val, sizeof(labels->labels[idx].val) - 1,
+                      (void *)name_ptr);
+
+  labels->len = idx + 1;
+}
+
 // unwind_stop is the tail call destination for PROG_UNWIND_STOP.
 static EBPF_INLINE int unwind_stop(struct pt_regs *ctx)
 {
@@ -295,6 +345,7 @@ static EBPF_INLINE int unwind_stop(struct pt_regs *ctx)
   // TEMPORARY HACK END
 
   // Must be last since it may not return (it will call send_trace).
+  maybe_add_cuda_labels(record);
   maybe_add_go_custom_labels(ctx, record);
 
   send_trace(ctx, trace);

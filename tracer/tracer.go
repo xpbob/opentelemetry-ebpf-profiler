@@ -183,6 +183,12 @@ type Config struct {
 	// LoadProbe indicates whether the generic eBPF program should be loaded
 	// without being attached to something.
 	LoadProbe bool
+	// EnableCuda indicates whether CUDA USDT probe should be enabled.
+	// Requires Linux 5.4+ kernel. Only effective in CPU sampling mode.
+	EnableCuda bool
+	// CudaBinary 指定包含 USDT 探针的二进制文件路径（如共享库 .so）。
+	// 若为空，则默认使用 /proc/<pid>/exe。
+	CudaBinary string
 }
 
 // hookPoint specifies the group and name of the hooked point in the kernel.
@@ -456,7 +462,7 @@ func initializeMapsAndPrograms(kmod *kallsyms.Module, cfg *Config) (
 		return nil, nil, nil, fmt.Errorf("failed to load perf eBPF programs: %v", err)
 	}
 
-	if cfg.OffCPUThreshold > 0 || len(cfg.ProbeLinks) > 0 || cfg.LoadProbe {
+	if cfg.OffCPUThreshold > 0 || len(cfg.ProbeLinks) > 0 || cfg.LoadProbe || cfg.EnableCuda {
 		// Load the tail call destinations if any kind of event profiling is enabled.
 		if err = loadProbeUnwinders(coll, ebpfProgs, ebpfMaps["kprobe_progs"], tailCallProgs,
 			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD()); err != nil {
@@ -494,6 +500,20 @@ func initializeMapsAndPrograms(kmod *kallsyms.Module, cfg *Config) (
 		if err = loadProbeUnwinders(coll, ebpfProgs, ebpfMaps["kprobe_progs"], probeProgs,
 			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD()); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to load uprobe eBPF programs: %v", err)
+		}
+	}
+
+	if cfg.EnableCuda {
+		cudaProgs := []progLoaderHelper{
+			{
+				name:             cudaProgName,
+				noTailCallTarget: true,
+				enable:           true,
+			},
+		}
+		if err = loadProbeUnwinders(coll, ebpfProgs, ebpfMaps["kprobe_progs"], cudaProgs,
+			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD()); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to load CUDA USDT eBPF programs: %v", err)
 		}
 	}
 
@@ -1083,6 +1103,7 @@ func (t *Tracer) loadBpfTrace(raw []byte, cpu int) (*libpf.EbpfTrace, error) {
 	case support.TraceOriginSampling:
 	case support.TraceOriginOffCPU:
 	case support.TraceOriginProbe:
+	case support.TraceOriginCuda:
 	default:
 		return nil, fmt.Errorf("origin %d: %w", trace.Origin, errOriginUnexpected)
 	}
@@ -1368,6 +1389,67 @@ func (t *Tracer) StartOffCPUProfiling() error {
 	}
 	t.hooks[hookPoint{group: "sched", name: "sched_switch"}] = tpLink
 
+	return nil
+}
+
+// StartCudaProfiling 启动 CUDA USDT 探针采集。
+// 通过扫描目标进程的 ELF 文件，找到 parcagpu:cuda_correlation USDT 探针，
+// 并用 uprobe 挂载 eBPF 程序进行栈回溯。
+// 仅在 CPU 采样模式下生效，需要 Linux 5.4+ 内核。
+func (t *Tracer) StartCudaProfiling(targetPID int, cudaBinary string) error {
+	cudaProg, ok := t.ebpfProgs[cudaProgName]
+	if !ok {
+		return errors.New("CUDA USDT program usdt__cuda_correlation is not available")
+	}
+
+	if targetPID <= 0 {
+		return errors.New("CUDA USDT profiling requires a target PID (-pid)")
+	}
+
+	// 确定包含 USDT 探针的二进制文件路径：
+	// 如果用户通过 -cuda-binary 指定了路径，则使用该路径；
+	// 否则默认使用 /proc/<pid>/exe（目标进程的主可执行文件）。
+	exePath := cudaBinary
+	if exePath == "" {
+		exePath = fmt.Sprintf("/proc/%d/exe", targetPID)
+	}
+
+	// 解析 ELF .note.stapsdt section，获取 USDT 探针的文件偏移地址。
+	// USDT 探针不在 ELF 符号表中，而是编码在 .note.stapsdt section 中，
+	// 因此不能直接通过符号名查找，需要手动解析 note 获取探针地址。
+	probe, err := findUSDTProbe(exePath, "parcagpu", "cuda_correlation")
+	if err != nil {
+		return fmt.Errorf("failed to find USDT probe in %q: %v", exePath, err)
+	}
+
+	log.Infof("Found USDT probe %s:%s in %q: LocationVA=0x%x FileOffset=0x%x SemaphoreVA=0x%x",
+		probe.Provider, probe.Name, exePath,
+		probe.LocationVA, probe.FileOffset, probe.SemaphoreVA)
+
+	ex, err := link.OpenExecutable(exePath)
+	if err != nil {
+		return fmt.Errorf("failed to open executable %q for PID %d: %v", exePath, targetPID, err)
+	}
+
+	// 通过 UprobeOptions.Address 直接指定探针的文件偏移地址来挂载 uprobe，
+	// 绕过 cilium/ebpf 的符号表查找（USDT 探针不在符号表中）。
+	// 当 Address > 0 时，cilium/ebpf 会跳过符号解析，直接使用该地址。
+	uprobeOpts := &link.UprobeOptions{
+		Address:      probe.FileOffset,
+		PID:          targetPID,
+		RefCtrOffset: probe.SemaphoreFileOffset,
+	}
+
+	// 使用空符号名 + Address 方式挂载 uprobe
+	usdtLink, err := ex.Uprobe("", cudaProg, uprobeOpts)
+	if err != nil {
+		return fmt.Errorf("failed to attach CUDA USDT probe (binary=%q, offset=0x%x) to PID %d: %v",
+			exePath, probe.FileOffset, targetPID, err)
+	}
+	t.hooks[hookPoint{group: "usdt", name: fmt.Sprintf("cuda_correlation_%d", targetPID)}] = usdtLink
+
+	log.Infof("Attached CUDA USDT probe from %q to PID %d (offset=0x%x)",
+		exePath, targetPID, probe.FileOffset)
 	return nil
 }
 

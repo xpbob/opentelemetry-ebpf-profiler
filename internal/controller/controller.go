@@ -109,6 +109,8 @@ func (c *Controller) Start(ctx context.Context) error {
 		ProbeLinks:             c.config.ProbeLinks,
 		LoadProbe:              c.config.LoadProbe,
 		ExecutableReporter:     c.config.ExecutableReporter,
+		EnableCuda:             c.config.EnableCuda,
+		CudaBinary:             c.config.CudaBinary,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load eBPF tracer: %w", err)
@@ -141,6 +143,14 @@ func (c *Controller) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to attach probes: %v", err)
 		}
 		log.Info("Attached probes")
+	}
+
+	// CUDA USDT 探针仅在 CPU 采样模式下生效
+	if c.config.EnableCuda {
+		if err := trc.StartCudaProfiling(c.config.TargetPID, c.config.CudaBinary); err != nil {
+			return fmt.Errorf("failed to start CUDA USDT profiling: %v", err)
+		}
+		log.Infof("Enabled CUDA USDT profiling for PID %d", c.config.TargetPID)
 	}
 
 	if c.config.ProbabilisticThreshold < tracer.ProbabilisticThresholdMax {

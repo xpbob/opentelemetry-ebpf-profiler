@@ -11,6 +11,7 @@ import (
 	"hash/fnv"
 	"slices"
 	"time"
+	"unique"
 
 	lru "github.com/elastic/go-freelru"
 	"go.opentelemetry.io/ebpf-profiler/internal/log"
@@ -28,6 +29,7 @@ import (
 	eim "go.opentelemetry.io/ebpf-profiler/processmanager/execinfomanager"
 	"go.opentelemetry.io/ebpf-profiler/reporter"
 	"go.opentelemetry.io/ebpf-profiler/reporter/samples"
+	"go.opentelemetry.io/ebpf-profiler/support"
 	"go.opentelemetry.io/ebpf-profiler/times"
 	"go.opentelemetry.io/ebpf-profiler/tracer/types"
 	"go.opentelemetry.io/ebpf-profiler/traceutil"
@@ -376,6 +378,23 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 		}
 	}
 	pm.mu.RUnlock()
+
+	// 对于 CUDA origin 的 trace，从 custom_labels 中取出 cuda_name 并作为叶子帧插入。
+	// Frames 布局：[0]=叶子（当前PC/栈顶） ... [末尾]=根（main/栈底）。
+	// folded 输出反转遍历：Frames[末尾] 在最左边（根），Frames[0] 在最右边（叶子）。
+	// 插入到 Frames[0] 使 [CUDA] name 显示在 libcuda_usdt.so 之后（最右边/叶子端）。
+	if bpfTrace.Origin == support.TraceOriginCuda {
+		cudaNameKey := libpf.Intern("cuda_name")
+		if cudaName, ok := bpfTrace.CustomLabels[cudaNameKey]; ok && cudaName != libpf.NullString {
+			cudaFrame := libpf.Frame{
+				Type:         libpf.NativeFrame,
+				FunctionName: libpf.Intern("[CUDA] " + cudaName.String()),
+			}
+			trace.Frames = slices.Insert(trace.Frames, 0, unique.Make(cudaFrame))
+			// 从 custom_labels 中移除 cuda_name，避免重复上报
+			delete(trace.CustomLabels, cudaNameKey)
+		}
+	}
 
 	trace.Hash = traceutil.HashTrace(trace)
 	meta.APMServiceName = pm.maybeNotifyAPMAgent(bpfTrace, trace.Hash, 1)
