@@ -366,6 +366,7 @@ typedef enum TraceOrigin {
   TRACE_OFF_CPU,
   TRACE_PROBE,
   TRACE_CUDA,
+  TRACE_CUDA_KERNEL_EXEC,
 } TraceOrigin;
 
 // Maximum number of unique stack deltas needed on a system. This is based on
@@ -571,6 +572,36 @@ typedef struct __attribute__((packed)) ApmCorrelationBuf {
 } ApmCorrelationBuf;
 
 #define CUSTOM_LABEL_MAX_KEY_LEN COMM_LEN
+// USDT 参数描述：描述如何从 pt_regs 中读取一个 USDT 参数。
+// 支持两种模式：
+//   1. 寄存器直接读取 (is_indirect == 0)：从 pt_regs 的 reg_offset 偏移处读取
+//   2. 寄存器间接读取 (is_indirect == 1)：先从 pt_regs 的 reg_offset 偏移处读取基址，
+//      再加上 mem_offset 从用户态内存读取
+typedef struct UsdtArgSpec {
+  s16 reg_offset;   // 寄存器在 pt_regs 中的字节偏移，-1 表示无效
+  s16 mem_offset;   // 内存偏移（间接寻址时使用）
+  u8  size;         // 参数大小（字节）：1, 2, 4, 8
+  u8  is_indirect;  // 是否间接寻址
+  u8  is_signed;    // 是否有符号
+  u8  _pad;
+} UsdtArgSpec;
+
+// 每个 USDT 探针最多支持 8 个参数
+#define USDT_MAX_ARGS 8
+
+// USDT 探针参数配置：描述一个 USDT 探针的所有参数如何读取
+typedef struct UsdtArgsConfig {
+  u8 num_args;                       // 有效参数个数
+  u8 _pad[7];
+  UsdtArgSpec args[USDT_MAX_ARGS];   // 各参数的读取描述
+} UsdtArgsConfig;
+
+// USDT 参数配置 map 的 key：
+// 0 = cuda_correlation, 1 = kernel_executed
+#define USDT_CONFIG_CUDA_CORRELATION 0
+#define USDT_CONFIG_KERNEL_EXECUTED  1
+#define USDT_CONFIG_MAX_ENTRIES      2
+
 // Big enough to hold UUIDs, etc.
 #define CUSTOM_LABEL_MAX_VAL_LEN 48
 
@@ -833,6 +864,10 @@ typedef struct PerCPURecord {
   // cuda_name_ptr 用于在 USDT 入口和 unwind_stop 之间传递 CUDA kernel name 的用户态指针。
   // 该字段不会被 get_pristine_per_cpu_record() 清零。
   u64 cuda_name_ptr;
+
+  // cuda_correlation_id 用于在 USDT 入口和 unwind_stop 之间传递 correlationId。
+  // 该字段不会被 get_pristine_per_cpu_record() 清零。
+  u64 cuda_correlation_id;
 } PerCPURecord;
 
 // https://github.com/torvalds/linux/blob/e9a6fb0bcdd7609be6969112f3fbfcce3b1d4a7c/include/linux/percpu.h#L24C39-L24C47

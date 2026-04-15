@@ -97,11 +97,12 @@ const (
 )
 
 const (
-	TraceOriginUnknown  = C.TRACE_UNKNOWN
-	TraceOriginSampling = C.TRACE_SAMPLING
-	TraceOriginOffCPU   = C.TRACE_OFF_CPU
-	TraceOriginProbe    = C.TRACE_PROBE
-	TraceOriginCuda     = C.TRACE_CUDA
+	TraceOriginUnknown        = C.TRACE_UNKNOWN
+	TraceOriginSampling       = C.TRACE_SAMPLING
+	TraceOriginOffCPU         = C.TRACE_OFF_CPU
+	TraceOriginProbe          = C.TRACE_PROBE
+	TraceOriginCuda           = C.TRACE_CUDA
+	TraceOriginCudaKernelExec = C.TRACE_CUDA_KERNEL_EXEC
 )
 
 type ApmSpanID C.ApmSpanID

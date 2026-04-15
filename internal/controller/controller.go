@@ -177,12 +177,58 @@ func (c *Controller) Start(ctx context.Context) error {
 	return nil
 }
 
+// StopCPUAndCorrelation 停止 CPU 采样和 cuda_correlation 探针，
+// 但保留 kernel_executed 探针继续运行，用于消费匹配的 CUDA kernel 执行数据。
+// 此方法用于定时采样模式下的两阶段停止：先停止采集源，再等待消费完成。
+func (c *Controller) StopCPUAndCorrelation() {
+	if c.tracer == nil {
+		return
+	}
+	// 停止 CPU 采样
+	c.tracer.StopCPUSampling()
+	// 停止 cuda_correlation 探针
+	if c.config.EnableCuda && c.config.TargetPID > 0 {
+		c.tracer.StopCudaCorrelation(c.config.TargetPID)
+	}
+}
+
+// StopKernelExecuted 停止 kernel_executed USDT 探针。
+func (c *Controller) StopKernelExecuted() {
+	if c.tracer == nil {
+		return
+	}
+	if c.config.EnableCuda && c.config.TargetPID > 0 {
+		c.tracer.StopKernelExecuted(c.config.TargetPID)
+	}
+}
+
+// PendingCudaCorrelationCount 返回当前未匹配的 CUDA correlation 数量。
+func (c *Controller) PendingCudaCorrelationCount() int {
+	if c.tracer == nil {
+		return 0
+	}
+	return c.tracer.PendingCudaCorrelationCount()
+}
+
+// FlushPendingCudaCorrelations 刷新所有未匹配的 CUDA correlation。
+// 对于每个未匹配的 correlation，用 (当前时间 - 触发时间) 作为采样次数报告。
+func (c *Controller) FlushPendingCudaCorrelations() {
+	if c.tracer != nil {
+		c.tracer.FlushPendingCudaCorrelations()
+	}
+}
+
 // Shutdown stops the controller
 func (c *Controller) Shutdown() {
 	c.shutdownOnceFn.Do(func() {
 		log.Info("Stop processing ...")
 		if c.cancelFunc != nil {
 			c.cancelFunc()
+		}
+
+		// 在停止 reporter 之前，先刷新所有未匹配的 CUDA correlation
+		if c.tracer != nil {
+			c.tracer.FlushPendingCudaCorrelations()
 		}
 
 		if c.reporter != nil {

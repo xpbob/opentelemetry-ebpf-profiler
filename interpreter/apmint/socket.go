@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.opentelemetry.io/ebpf-profiler/libpf"
+	"go.opentelemetry.io/ebpf-profiler/process"
 	"go.opentelemetry.io/ebpf-profiler/libpf/xsync"
 	"go.opentelemetry.io/ebpf-profiler/stringutil"
 )
@@ -121,7 +122,7 @@ func (m *traceCorrMsg) Serialize() []byte {
 
 // readProcessOwner reads the effective UID and GID of the target process.
 func readProcessOwner(pid libpf.PID) (euid, egid uint32, err error) {
-	statusFd, err := os.Open(fmt.Sprintf("/proc/%d/status", pid))
+	statusFd, err := os.Open(process.ProcPath(pid, "status"))
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to open process status: %v", err)
 	}

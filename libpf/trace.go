@@ -123,6 +123,12 @@ type EbpfTrace struct {
 	KernelFrames     Frames
 	FrameData        []uint64
 	FrameDataBuf     [3072]uint64
+
+	// CUDA 相关字段：直接从 eBPF custom_labels 的二进制 u64 值中解析，
+	// 避免经过字符串转换时 \0 截断导致数据丢失。
+	CudaCorrelationId uint64
+	CudaKernelStart   uint64
+	CudaKernelEnd     uint64
 }
 
 type EbpfFrame []uint64

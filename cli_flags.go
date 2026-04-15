@@ -93,10 +93,20 @@ var (
 	fileTypeHelp = "Output file format type. Supported values: 'folded' (default, for flamegraph.pl), " +
 		"'jfr' (JDK Flight Recorder format, for JMC or jfr tool), " +
 		"and 'pprof' (pprof format, for go tool pprof or pprof CLI)."
+	hostProcHelp = "Path to the host's /proc filesystem. " +
+		"When running inside a container, mount the host's /proc to a path inside the container " +
+		"(e.g. -v /proc:/host/proc:ro) and set this flag to that path (e.g. -host-proc=/host/proc). " +
+		"This allows the profiler to access all host processes. " +
+		"Defaults to /proc (suitable for running directly on the host). " +
+		"Can also be set via HOST_PROC environment variable."
 	enableCudaHelp = "Enable CUDA USDT probe for GPU kernel correlation. " +
 		"Requires Linux 5.4+ kernel. Only effective in CPU sampling mode."
 	cudaBinaryHelp = "Path to the binary (e.g. shared library .so) containing the USDT probe " +
 		"parcagpu:cuda_correlation. If not specified, defaults to /proc/<pid>/exe."
+	enableTimeHelp = "Enable converting CPU sampling counts to time (ms). " +
+		"When enabled, the sample count for CPU profiling is converted to time using: count * (1000 / samples-per-second). " +
+		"Only affects CPU sampling, not USDT or uprobe events. " +
+		"Defaults to true when -enable-cuda is set, otherwise defaults to false."
 )
 
 // Package-scope variable, so that conditionally compiled other components can refer
@@ -172,6 +182,10 @@ func parseArgs() (*controller.Config, error) {
 
 	fs.BoolVar(&args.EnableCuda, "enable-cuda", false, enableCudaHelp)
 	fs.StringVar(&args.CudaBinary, "cuda-binary", "", cudaBinaryHelp)
+	fs.StringVar(&args.HostProc, "host-proc", "/proc", hostProcHelp)
+
+	var enableTime bool
+	fs.BoolVar(&enableTime, "enable-time", false, enableTimeHelp)
 
 	fs.Usage = func() {
 		fs.PrintDefaults()
@@ -181,7 +195,7 @@ func parseArgs() (*controller.Config, error) {
 
 	args.ErrorMode = config.PropagateError
 
-	return &args, ff.Parse(fs, os.Args[1:],
+	err := ff.Parse(fs, os.Args[1:],
 		ff.WithEnvVarPrefix("OTEL_PROFILING_AGENT"),
 		ff.WithConfigFileFlag("config"),
 		ff.WithConfigFileParser(ff.PlainParser),
@@ -190,4 +204,28 @@ func parseArgs() (*controller.Config, error) {
 		ff.WithIgnoreUndefined(true),
 		ff.WithAllowMissingConfigFile(true),
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	// 处理 enable-time 的默认值逻辑：
+	// 如果用户显式设置了 -enable-time，使用用户的值；
+	// 否则，当 -enable-cuda 开启时默认开启 enable-time。
+	enableTimeExplicitlySet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "enable-time" {
+			enableTimeExplicitlySet = true
+		}
+	})
+
+	if enableTimeExplicitlySet {
+		args.EnableTime = &enableTime
+	} else if args.EnableCuda {
+		// -enable-cuda 开启时，enable-time 默认为 true
+		defaultEnableTime := true
+		args.EnableTime = &defaultEnableTime
+	}
+	// 否则 args.EnableTime 保持 nil（等同于 false）
+
+	return &args, nil
 }

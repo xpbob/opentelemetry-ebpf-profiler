@@ -77,6 +77,26 @@ type Config struct {
 	// CudaBinary 指定包含 USDT 探针的二进制文件路径（如共享库 .so）。
 	// 若为空，则默认使用 /proc/<pid>/exe。
 	CudaBinary             string        `mapstructure:"cuda_binary"`
+	// EnableTime 开启后，将 CPU 采样的采样次数转换为时间（ms），
+	// 转换规则：count * (1000 / SamplesPerSecond)。
+	// 在 EnableCuda 开启时默认为 true，可以手动关闭。
+	// 仅对 CPU 采样生效，对 USDT、uprobe 等无效。
+	EnableTime             *bool         `mapstructure:"enable_time"`
+	// HostProc 指定宿主机 /proc 的挂载路径。
+	// 物理机上运行时默认为 "/proc"；
+	// 容器内运行时，需要挂载宿主机的 /proc（如 -v /proc:/host/proc:ro），
+	// 然后设置此参数为 "/host/proc"。
+	HostProc               string        `mapstructure:"host_proc"`
+}
+
+// IsEnableTime 返回 EnableTime 的实际值。
+// 如果用户显式设置了 EnableTime，返回用户设置的值；
+// 否则，当 EnableCuda 开启时默认返回 true。
+func (cfg *Config) IsEnableTime() bool {
+	if cfg.EnableTime != nil {
+		return *cfg.EnableTime
+	}
+	return cfg.EnableCuda
 }
 
 // Validate validates the config.

@@ -239,6 +239,7 @@ static EBPF_INLINE void maybe_add_apm_info(Trace *trace)
 
 // maybe_add_cuda_labels 在 unwind_stop 中检查 trace 是否来自 CUDA USDT 探针，
 // 如果是则从 per-CPU record 的 cuda_name_ptr 读取 CUDA kernel name，
+// 从 cuda_correlation_id 读取 correlationId，
 // 并填入 trace 的 custom_labels。
 static EBPF_INLINE void maybe_add_cuda_labels(PerCPURecord *record)
 {
@@ -248,43 +249,59 @@ static EBPF_INLINE void maybe_add_cuda_labels(PerCPURecord *record)
   }
 
   u64 name_ptr = record->cuda_name_ptr;
-  if (name_ptr == 0) {
-    return;
-  }
+  u64 correlation_id = record->cuda_correlation_id;
 
-  // 清零 cuda_name_ptr，避免后续非 CUDA trace 误读
+  // 清零，避免后续非 CUDA trace 误读
   record->cuda_name_ptr = 0;
+  record->cuda_correlation_id = 0;
 
   CustomLabelsArray *labels = &trace->custom_labels;
-  // 确保不超过 MAX_CUSTOM_LABELS
-  if (labels->len >= MAX_CUSTOM_LABELS) {
-    return;
+
+  // 写入 cuda_name
+  if (name_ptr != 0 && labels->len < MAX_CUSTOM_LABELS) {
+    u32 idx = labels->len;
+    if (idx < MAX_CUSTOM_LABELS) {
+      __builtin_memset(labels->labels[idx].key, 0, sizeof(labels->labels[idx].key));
+      labels->labels[idx].key[0] = 'c';
+      labels->labels[idx].key[1] = 'u';
+      labels->labels[idx].key[2] = 'd';
+      labels->labels[idx].key[3] = 'a';
+      labels->labels[idx].key[4] = '_';
+      labels->labels[idx].key[5] = 'n';
+      labels->labels[idx].key[6] = 'a';
+      labels->labels[idx].key[7] = 'm';
+      labels->labels[idx].key[8] = 'e';
+
+      __builtin_memset(labels->labels[idx].val, 0, sizeof(labels->labels[idx].val));
+      bpf_probe_read_user(labels->labels[idx].val, sizeof(labels->labels[idx].val) - 1,
+                          (void *)name_ptr);
+      labels->len = idx + 1;
+    }
   }
 
-  u32 idx = labels->len;
-  // 边界检查，满足 verifier
-  if (idx >= MAX_CUSTOM_LABELS) {
-    return;
+  // 写入 cuda_corr_id（二进制 u64）
+  if (labels->len < MAX_CUSTOM_LABELS) {
+    u32 idx = labels->len;
+    if (idx < MAX_CUSTOM_LABELS) {
+      __builtin_memset(labels->labels[idx].key, 0, sizeof(labels->labels[idx].key));
+      labels->labels[idx].key[0] = 'c';
+      labels->labels[idx].key[1] = 'u';
+      labels->labels[idx].key[2] = 'd';
+      labels->labels[idx].key[3] = 'a';
+      labels->labels[idx].key[4] = '_';
+      labels->labels[idx].key[5] = 'c';
+      labels->labels[idx].key[6] = 'o';
+      labels->labels[idx].key[7] = 'r';
+      labels->labels[idx].key[8] = 'r';
+      labels->labels[idx].key[9] = '_';
+      labels->labels[idx].key[10] = 'i';
+      labels->labels[idx].key[11] = 'd';
+
+      __builtin_memset(labels->labels[idx].val, 0, sizeof(labels->labels[idx].val));
+      *(u64 *)labels->labels[idx].val = correlation_id;
+      labels->len = idx + 1;
+    }
   }
-
-  // key = "cuda_name"
-  __builtin_memset(labels->labels[idx].key, 0, sizeof(labels->labels[idx].key));
-  labels->labels[idx].key[0] = 'c';
-  labels->labels[idx].key[1] = 'u';
-  labels->labels[idx].key[2] = 'd';
-  labels->labels[idx].key[3] = 'a';
-  labels->labels[idx].key[4] = '_';
-  labels->labels[idx].key[5] = 'n';
-  labels->labels[idx].key[6] = 'a';
-  labels->labels[idx].key[7] = 'm';
-  labels->labels[idx].key[8] = 'e';
-
-  // 从用户空间读取 name 字符串
-  __builtin_memset(labels->labels[idx].val, 0, sizeof(labels->labels[idx].val));
-  bpf_probe_read_user(labels->labels[idx].val, sizeof(labels->labels[idx].val) - 1,
-                      (void *)name_ptr);
-
-  labels->len = idx + 1;
 }
 
 // unwind_stop is the tail call destination for PROG_UNWIND_STOP.

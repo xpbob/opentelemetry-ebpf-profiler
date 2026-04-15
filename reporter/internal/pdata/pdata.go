@@ -16,12 +16,16 @@ type Pdata struct {
 
 	// samplesPerSecond is the number of samples per second.
 	samplesPerSecond int
+
+	// enableTime 开启后，将 CPU 采样的采样次数转换为时间（ms）。
+	enableTime bool
 }
 
-func New(samplesPerSecond int, extra samples.SampleAttrProducer) (*Pdata, error) {
+func New(samplesPerSecond int, extra samples.SampleAttrProducer, enableTime bool) (*Pdata, error) {
 	return &Pdata{
 		samplesPerSecond:    samplesPerSecond,
 		ExtraSampleAttrProd: extra,
+		enableTime:          enableTime,
 	}, nil
 }
 

@@ -8,10 +8,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -34,6 +36,7 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/periodiccaller"
 	pm "go.opentelemetry.io/ebpf-profiler/processmanager"
 	pmebpf "go.opentelemetry.io/ebpf-profiler/processmanager/ebpf"
+	"go.opentelemetry.io/ebpf-profiler/process"
 	"go.opentelemetry.io/ebpf-profiler/reporter"
 	"go.opentelemetry.io/ebpf-profiler/rlimit"
 	"go.opentelemetry.io/ebpf-profiler/support"
@@ -43,6 +46,9 @@ import (
 
 // Compile time check to make sure times.Times satisfies the interfaces.
 var _ Intervals = (*times.Times)(nil)
+
+// nativeEndian 用于从 eBPF custom_labels 的原始字节中读取 u64 值。
+var nativeEndian = binary.NativeEndian
 
 const (
 	// ProbabilisticThresholdMax defines the upper bound of the probabilistic profiling
@@ -319,6 +325,30 @@ func (t *Tracer) Close() {
 	t.signalDone()
 }
 
+// StopCPUSampling 停止 CPU 采样，关闭所有 perf events。
+// 调用后 CPU 采样不再触发，但 USDT 探针（如 kernel_executed）仍然保持活跃。
+func (t *Tracer) StopCPUSampling() {
+	events := t.perfEntrypoints.WLock()
+	terminatePerfEvents(*events)
+	*events = nil
+	t.perfEntrypoints.WUnlock(&events)
+	log.Info("CPU sampling stopped (perf events terminated)")
+}
+
+// StopCudaCorrelation 停止 cuda_correlation USDT 探针。
+// 关闭对应的 uprobe link，但保留 kernel_executed 探针继续运行。
+func (t *Tracer) StopCudaCorrelation(targetPID int) {
+	hookName := fmt.Sprintf("cuda_correlation_%d", targetPID)
+	hp := hookPoint{group: "usdt", name: hookName}
+	if hook, ok := t.hooks[hp]; ok {
+		if err := hook.Close(); err != nil {
+			log.Errorf("Failed to close cuda_correlation hook: %v", err)
+		}
+		delete(t.hooks, hp)
+		log.Infof("Stopped cuda_correlation USDT probe for PID %d", targetPID)
+	}
+}
+
 // initializeMapsAndPrograms loads the definitions for the eBPF maps and programs provided
 // by the embedded elf file and loads these into the kernel.
 func initializeMapsAndPrograms(kmod *kallsyms.Module, cfg *Config) (
@@ -510,6 +540,11 @@ func initializeMapsAndPrograms(kmod *kallsyms.Module, cfg *Config) (
 				noTailCallTarget: true,
 				enable:           true,
 			},
+			{
+				name:             cudaKernelExecProgName,
+				noTailCallTarget: true,
+				enable:           true,
+			},
 		}
 		if err = loadProbeUnwinders(coll, ebpfProgs, ebpfMaps["kprobe_progs"], cudaProgs,
 			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD()); err != nil {
@@ -655,6 +690,11 @@ func loadAllMaps(coll *cebpf.CollectionSpec, cfg *Config,
 	for mapName, mapSpec := range coll.Maps {
 		if mapName == "sched_times" && cfg.OffCPUThreshold == 0 {
 			// Off CPU Profiling is disabled. So do not load this map.
+			continue
+		}
+
+		if mapName == "usdt_args_config" && !cfg.EnableCuda {
+			// CUDA USDT profiling is disabled. So do not load this map.
 			continue
 		}
 
@@ -1104,6 +1144,7 @@ func (t *Tracer) loadBpfTrace(raw []byte, cpu int) (*libpf.EbpfTrace, error) {
 	case support.TraceOriginOffCPU:
 	case support.TraceOriginProbe:
 	case support.TraceOriginCuda:
+	case support.TraceOriginCudaKernelExec:
 	default:
 		return nil, fmt.Errorf("origin %d: %w", trace.Origin, errOriginUnexpected)
 	}
@@ -1112,9 +1153,25 @@ func (t *Tracer) loadBpfTrace(raw []byte, cpu int) (*libpf.EbpfTrace, error) {
 		trace.CustomLabels = make(map[libpf.String]libpf.String, int(ptr.Custom_labels.Len))
 		for i := 0; i < int(ptr.Custom_labels.Len); i++ {
 			lbl := ptr.Custom_labels.Labels[i]
-			key := goString(lbl.Key[:])
+			keyStr := goString(lbl.Key[:])
+			keyRaw := keyStr.String()
+
+			// 对于 CUDA 二进制 u64 值的 key，直接从 val 原始字节中读取，
+			// 避免经过字符串转换时 \0 截断导致数据丢失。
+			switch keyRaw {
+			case "cuda_corr_id":
+				trace.CudaCorrelationId = nativeEndian.Uint64(lbl.Val[:8])
+				continue
+			case "cuda_start":
+				trace.CudaKernelStart = nativeEndian.Uint64(lbl.Val[:8])
+				continue
+			case "cuda_end":
+				trace.CudaKernelEnd = nativeEndian.Uint64(lbl.Val[:8])
+				continue
+			}
+
 			val := goString(lbl.Val[:])
-			trace.CustomLabels[key] = val
+			trace.CustomLabels[keyStr] = val
 		}
 	}
 
@@ -1393,8 +1450,9 @@ func (t *Tracer) StartOffCPUProfiling() error {
 }
 
 // StartCudaProfiling 启动 CUDA USDT 探针采集。
-// 通过扫描目标进程的 ELF 文件，找到 parcagpu:cuda_correlation USDT 探针，
-// 并用 uprobe 挂载 eBPF 程序进行栈回溯。
+// 通过扫描目标进程的 ELF 文件，找到 parcagpu:cuda_correlation 和
+// parcagpu:kernel_executed USDT 探针，并用 uprobe 挂载 eBPF 程序。
+// cuda_correlation 进行栈回溯，kernel_executed 仅采集 timing 信息。
 // 仅在 CPU 采样模式下生效，需要 Linux 5.4+ 内核。
 func (t *Tracer) StartCudaProfiling(targetPID int, cudaBinary string) error {
 	cudaProg, ok := t.ebpfProgs[cudaProgName]
@@ -1402,8 +1460,20 @@ func (t *Tracer) StartCudaProfiling(targetPID int, cudaBinary string) error {
 		return errors.New("CUDA USDT program usdt__cuda_correlation is not available")
 	}
 
+	cudaKernelExecProg, ok := t.ebpfProgs[cudaKernelExecProgName]
+	if !ok {
+		return errors.New("CUDA USDT program usdt__kernel_executed is not available")
+	}
+
 	if targetPID <= 0 {
 		return errors.New("CUDA USDT profiling requires a target PID (-pid)")
+	}
+
+	// 验证目标进程是否存在
+	procStatusPath := fmt.Sprintf("%s/%d/status", process.ProcFSRoot, targetPID)
+	if _, err := os.Stat(procStatusPath); err != nil {
+		return fmt.Errorf("target process PID %d does not exist (checked %s): %v. "+
+			"Please verify the PID is correct and the process is still running", targetPID, procStatusPath, err)
 	}
 
 	// 确定包含 USDT 探针的二进制文件路径：
@@ -1411,45 +1481,115 @@ func (t *Tracer) StartCudaProfiling(targetPID int, cudaBinary string) error {
 	// 否则默认使用 /proc/<pid>/exe（目标进程的主可执行文件）。
 	exePath := cudaBinary
 	if exePath == "" {
-		exePath = fmt.Sprintf("/proc/%d/exe", targetPID)
+		exePath = fmt.Sprintf("%s/%d/exe", process.ProcFSRoot, targetPID)
 	}
 
-	// 解析 ELF .note.stapsdt section，获取 USDT 探针的文件偏移地址。
-	// USDT 探针不在 ELF 符号表中，而是编码在 .note.stapsdt section 中，
-	// 因此不能直接通过符号名查找，需要手动解析 note 获取探针地址。
-	probe, err := findUSDTProbe(exePath, "parcagpu", "cuda_correlation")
-	if err != nil {
-		return fmt.Errorf("failed to find USDT probe in %q: %v", exePath, err)
+	// 在容器场景下，profiler 和目标进程可能在不同的 mount namespace 中。
+	// perf_event_open 的 uprobe 路径是从调用者的 mount namespace 解析的，
+	// 如果直接使用 exePath，内核解析到的 inode 可能与目标进程实际加载的
+	// so 文件的 inode 不同，导致 uprobe 虽然挂载成功但永远不会触发。
+	//
+	// 解决方案：使用 /proc/<pid>/root/<path> 作为 uprobe 路径。
+	// /proc/<pid>/root/ 是目标进程的根文件系统视图，通过它可以确保
+	// 路径解析在目标进程的 mount namespace 中进行，得到正确的 inode。
+	//
+	// 注意：findUSDTProbe 解析 ELF 用 exePath（只需要能读取文件内容），
+	// 而 link.OpenExecutable 传入的路径会被 perf_event_open 使用，
+	// 必须能解析到目标进程实际加载的 inode。
+	uprobePath := exePath
+	if cudaBinary != "" {
+		// 用户指定了 cuda-binary 路径，通过 /proc/<pid>/root/ 前缀
+		// 确保在目标进程的 mount namespace 中解析路径。
+		procRootPath := fmt.Sprintf("%s/%d/root%s", process.ProcFSRoot, targetPID, cudaBinary)
+		if _, err := os.Stat(procRootPath); err == nil {
+			uprobePath = procRootPath
+			log.Infof("Using /proc/%d/root path for uprobe: %s", targetPID, uprobePath)
+		}
 	}
 
-	log.Infof("Found USDT probe %s:%s in %q: LocationVA=0x%x FileOffset=0x%x SemaphoreVA=0x%x",
-		probe.Provider, probe.Name, exePath,
-		probe.LocationVA, probe.FileOffset, probe.SemaphoreVA)
-
-	ex, err := link.OpenExecutable(exePath)
+	ex, err := link.OpenExecutable(uprobePath)
 	if err != nil {
 		return fmt.Errorf("failed to open executable %q for PID %d: %v", exePath, targetPID, err)
 	}
 
-	// 通过 UprobeOptions.Address 直接指定探针的文件偏移地址来挂载 uprobe，
-	// 绕过 cilium/ebpf 的符号表查找（USDT 探针不在符号表中）。
-	// 当 Address > 0 时，cilium/ebpf 会跳过符号解析，直接使用该地址。
-	uprobeOpts := &link.UprobeOptions{
-		Address:      probe.FileOffset,
-		PID:          targetPID,
-		RefCtrOffset: probe.SemaphoreFileOffset,
+	// 获取 usdt_args_config map，用于传递 USDT 参数读取配置给 eBPF 程序
+	usdtArgsMap, ok := t.ebpfMaps["usdt_args_config"]
+	if !ok {
+		return errors.New("usdt_args_config eBPF map is not available")
 	}
 
-	// 使用空符号名 + Address 方式挂载 uprobe
-	usdtLink, err := ex.Uprobe("", cudaProg, uprobeOpts)
+	// --- 挂载 parcagpu:cuda_correlation ---
+	// 使用 uprobePath 解析 ELF，确保在容器场景下也能正确读取文件。
+	corrProbe, err := findUSDTProbe(uprobePath, "parcagpu", "cuda_correlation")
 	if err != nil {
-		return fmt.Errorf("failed to attach CUDA USDT probe (binary=%q, offset=0x%x) to PID %d: %v",
-			exePath, probe.FileOffset, targetPID, err)
+		return fmt.Errorf("failed to find USDT probe cuda_correlation in %q: %v", exePath, err)
 	}
-	t.hooks[hookPoint{group: "usdt", name: fmt.Sprintf("cuda_correlation_%d", targetPID)}] = usdtLink
 
-	log.Infof("Attached CUDA USDT probe from %q to PID %d (offset=0x%x)",
-		exePath, targetPID, probe.FileOffset)
+	log.Infof("Found USDT probe %s:%s in %q: LocationVA=0x%x FileOffset=0x%x SemaphoreVA=0x%x Arguments=%q",
+		corrProbe.Provider, corrProbe.Name, exePath,
+		corrProbe.LocationVA, corrProbe.FileOffset, corrProbe.SemaphoreVA, corrProbe.Arguments)
+
+	// 解析 cuda_correlation 的 SDT Arguments 并写入 eBPF map
+	corrArgsConfig, err := parseSDTArguments(corrProbe.Arguments)
+	if err != nil {
+		return fmt.Errorf("failed to parse SDT arguments for cuda_correlation (%q): %v",
+			corrProbe.Arguments, err)
+	}
+	corrConfigKey := uint32(0) // USDT_CONFIG_CUDA_CORRELATION
+	if err := usdtArgsMap.Update(corrConfigKey, corrArgsConfig, 0); err != nil {
+		return fmt.Errorf("failed to update usdt_args_config map for cuda_correlation: %v", err)
+	}
+	log.Infof("Wrote USDT args config for cuda_correlation: num_args=%d", corrArgsConfig.NumArgs)
+
+	corrLink, err := ex.Uprobe("", cudaProg, &link.UprobeOptions{
+		Address:      corrProbe.FileOffset,
+		PID:          targetPID,
+		RefCtrOffset: corrProbe.SemaphoreFileOffset,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to attach CUDA USDT probe cuda_correlation (binary=%q, offset=0x%x) to PID %d: %v",
+			exePath, corrProbe.FileOffset, targetPID, err)
+	}
+	t.hooks[hookPoint{group: "usdt", name: fmt.Sprintf("cuda_correlation_%d", targetPID)}] = corrLink
+	log.Infof("Attached CUDA USDT probe cuda_correlation from %q to PID %d (offset=0x%x)",
+		exePath, targetPID, corrProbe.FileOffset)
+
+	// --- 挂载 parcagpu:kernel_executed ---
+	// 使用 uprobePath 解析 ELF，确保在容器场景下也能正确读取文件。
+	kernelExecProbe, err := findUSDTProbe(uprobePath, "parcagpu", "kernel_executed")
+	if err != nil {
+		return fmt.Errorf("failed to find USDT probe kernel_executed in %q: %v", exePath, err)
+	}
+
+	log.Infof("Found USDT probe %s:%s in %q: LocationVA=0x%x FileOffset=0x%x SemaphoreVA=0x%x Arguments=%q",
+		kernelExecProbe.Provider, kernelExecProbe.Name, exePath,
+		kernelExecProbe.LocationVA, kernelExecProbe.FileOffset, kernelExecProbe.SemaphoreVA, kernelExecProbe.Arguments)
+
+	// 解析 kernel_executed 的 SDT Arguments 并写入 eBPF map
+	kernelExecArgsConfig, err := parseSDTArguments(kernelExecProbe.Arguments)
+	if err != nil {
+		return fmt.Errorf("failed to parse SDT arguments for kernel_executed (%q): %v",
+			kernelExecProbe.Arguments, err)
+	}
+	kernelExecConfigKey := uint32(1) // USDT_CONFIG_KERNEL_EXECUTED
+	if err := usdtArgsMap.Update(kernelExecConfigKey, kernelExecArgsConfig, 0); err != nil {
+		return fmt.Errorf("failed to update usdt_args_config map for kernel_executed: %v", err)
+	}
+	log.Infof("Wrote USDT args config for kernel_executed: num_args=%d", kernelExecArgsConfig.NumArgs)
+
+	kernelExecLink, err := ex.Uprobe("", cudaKernelExecProg, &link.UprobeOptions{
+		Address:      kernelExecProbe.FileOffset,
+		PID:          targetPID,
+		RefCtrOffset: kernelExecProbe.SemaphoreFileOffset,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to attach CUDA USDT probe kernel_executed (binary=%q, offset=0x%x) to PID %d: %v",
+			exePath, kernelExecProbe.FileOffset, targetPID, err)
+	}
+	t.hooks[hookPoint{group: "usdt", name: fmt.Sprintf("kernel_executed_%d", targetPID)}] = kernelExecLink
+	log.Infof("Attached CUDA USDT probe kernel_executed from %q to PID %d (offset=0x%x)",
+		exePath, targetPID, kernelExecProbe.FileOffset)
+
 	return nil
 }
 
@@ -1481,4 +1621,29 @@ func (t *Tracer) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 	// Reclaim the EbpfTrace
 	bpfTrace.KernelFrames = bpfTrace.KernelFrames[0:0]
 	t.tracePool.Put(bpfTrace)
+}
+
+// FlushPendingCudaCorrelations 刷新所有未匹配的 CUDA correlation。
+// 应在程序退出前调用，确保所有 pending correlation 都被处理。
+func (t *Tracer) FlushPendingCudaCorrelations() {
+	t.processManager.FlushPendingCudaCorrelations()
+}
+
+// StopKernelExecuted 停止 kernel_executed USDT 探针。
+// 关闭对应的 uprobe link，之后不再接收 kernel_executed 事件。
+func (t *Tracer) StopKernelExecuted(targetPID int) {
+	hookName := fmt.Sprintf("kernel_executed_%d", targetPID)
+	hp := hookPoint{group: "usdt", name: hookName}
+	if hook, ok := t.hooks[hp]; ok {
+		if err := hook.Close(); err != nil {
+			log.Errorf("Failed to close kernel_executed hook: %v", err)
+		}
+		delete(t.hooks, hp)
+		log.Infof("Stopped kernel_executed USDT probe for PID %d", targetPID)
+	}
+}
+
+// PendingCudaCorrelationCount 返回当前未匹配的 CUDA correlation 数量。
+func (t *Tracer) PendingCudaCorrelationCount() int {
+	return t.processManager.PendingCudaCorrelationCount()
 }

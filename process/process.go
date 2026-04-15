@@ -34,6 +34,152 @@ var ErrNoMappings = errors.New("no mappings")
 // false, signaling that iteration was intentionally interrupted.
 var ErrCallbackStopped = errors.New("IterateMappings stopped by callback")
 
+// ProcFSRoot 是 procfs 的挂载路径。
+// 物理机上运行时为默认值 "/proc"；
+// 容器内运行时，需要将宿主机的 /proc 挂载到容器内（如 -v /proc:/host/proc:ro），
+// 然后通过 -host-proc=/host/proc 参数设置此变量。
+// 这样 profiler 就能通过宿主机的 /proc 访问所有进程的信息，
+// 解决容器内 PID namespace 隔离导致的进程不可见问题。
+var ProcFSRoot = "/proc"
+
+// ProcPath 构建 procfs 下的路径。
+// 例如 ProcPath(1234, "maps") 返回 "/proc/1234/maps"（物理机）
+// 或 "/host/proc/1234/maps"（容器内，ProcFSRoot="/host/proc"）。
+func ProcPath(pid libpf.PID, subpath string) string {
+	return fmt.Sprintf("%s/%d/%s", ProcFSRoot, pid, subpath)
+}
+
+// ProcPathStr 与 ProcPath 类似，但 pid 参数为 int 类型。
+func ProcPathStr(pid int, subpath string) string {
+	return fmt.Sprintf("%s/%d/%s", ProcFSRoot, pid, subpath)
+}
+
+// ProcSelfPath 构建 /proc/self 下的路径。
+func ProcSelfPath(subpath string) string {
+	return fmt.Sprintf("%s/self/%s", ProcFSRoot, subpath)
+}
+
+// ResolveHostPID 将用户传入的 PID 转换为宿主机 PID。
+// 在容器中运行时，用户传入的 PID 可能是容器内的 namespace PID，
+// 而 eBPF 程序（bpf_get_current_pid_tgid）返回的是宿主机全局 PID。
+//
+// 解析策略：
+// 1. 当 ProcFSRoot != "/proc"（容器模式，挂载了宿主机 /proc）时：
+//    遍历宿主机 /proc 下所有进程，读取每个进程的 NStgid 字段，
+//    找到 NStgid 中包含用户传入的 namespace PID 的那个进程的宿主机 PID。
+// 2. 当 ProcFSRoot == "/proc"（物理机模式）时：
+//    直接读取 /proc/<pid>/status 中的 NStgid 字段获取宿主机 PID，
+//    或通过 /proc/<pid>/sched 获取宿主机 PID。
+func ResolveHostPID(pid int) int {
+	if pid <= 0 {
+		return pid
+	}
+
+	// 容器模式：ProcFSRoot 指向宿主机的 /proc（如 /host/proc）
+	if ProcFSRoot != "/proc" {
+		hostPID := findHostPIDByNamespacePID(pid)
+		if hostPID > 0 {
+			log.Infof("容器模式 PID 映射：namespace PID %d -> 宿主机 PID %d", pid, hostPID)
+			return hostPID
+		}
+		log.Warnf("容器模式下未找到 namespace PID %d 对应的宿主机 PID，"+
+			"将直接使用 PID %d（如果这是宿主机 PID 则正常工作）", pid, pid)
+		return pid
+	}
+
+	// 物理机模式：ProcFSRoot == "/proc"
+	statusPath := ProcPathStr(pid, "status")
+	if data, err := os.ReadFile(statusPath); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "NStgid:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					hostPID, err := strconv.Atoi(fields[1])
+					if err == nil && hostPID != pid {
+						log.Infof("PID namespace 检测（NStgid）：容器内 PID %d -> 宿主机 PID %d", pid, hostPID)
+						return hostPID
+					}
+				}
+				break
+			}
+		}
+	}
+
+	schedPath := ProcPathStr(pid, "sched")
+	if data, err := os.ReadFile(schedPath); err == nil {
+		firstLine := strings.SplitN(string(data), "\n", 2)[0]
+		if start := strings.Index(firstLine, "("); start >= 0 {
+			if end := strings.Index(firstLine[start:], ","); end >= 0 {
+				pidStr := strings.TrimSpace(firstLine[start+1 : start+end])
+				if hostPID, err := strconv.Atoi(pidStr); err == nil && hostPID != pid {
+					log.Infof("PID namespace 检测（sched）：容器内 PID %d -> 宿主机 PID %d", pid, hostPID)
+					return hostPID
+				}
+			}
+		}
+	}
+
+	return pid
+}
+
+// findHostPIDByNamespacePID 遍历宿主机 /proc 下所有进程，
+// 找到 NStgid 中包含指定 namespace PID 的进程，返回其宿主机 PID。
+func findHostPIDByNamespacePID(nsPID int) int {
+	entries, err := os.ReadDir(ProcFSRoot)
+	if err != nil {
+		log.Warnf("无法读取 %s 目录: %v", ProcFSRoot, err)
+		return 0
+	}
+
+	nsPIDStr := strconv.Itoa(nsPID)
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		hostPID, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		statusPath := fmt.Sprintf("%s/%s/status", ProcFSRoot, entry.Name())
+		data, err := os.ReadFile(statusPath)
+		if err != nil {
+			continue
+		}
+
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "NStgid:") {
+				continue
+			}
+			fields := strings.Fields(line)
+			// NStgid 格式: "NStgid:\t<host_pid>\t[<ns_pid>...]"
+			// fields[0] = "NStgid:", fields[1] = host_pid, fields[2..] = namespace PIDs
+			//
+			// 情况 1: len(fields) >= 3 — 进程在嵌套 PID namespace 中，
+			//         最后一个字段是最内层 namespace PID。
+			// 情况 2: len(fields) == 2 — 进程不在嵌套 PID namespace 中
+			//         （如 --pid=host 模式），只有一个 PID 值。
+			if len(fields) >= 3 {
+				innermostNsPID := fields[len(fields)-1]
+				if innermostNsPID == nsPIDStr && hostPID != nsPID {
+					return hostPID
+				}
+			} else if len(fields) == 2 {
+				// --pid=host 模式或无嵌套 namespace：NStgid 只有一个值，
+				// 此时 hostPID 就是实际 PID，如果与 nsPID 匹配则直接返回。
+				if fields[1] == nsPIDStr {
+					log.Infof("进程 PID %d 不在嵌套 PID namespace 中（可能是 --pid=host 模式），无需转换", nsPID)
+					return hostPID
+				}
+			}
+			break
+		}
+	}
+
+	return 0
+}
+
 const (
 	containerSource = "[0-9a-f]{64}"
 	taskSource      = "[0-9a-f]{32}-\\d+"
@@ -98,7 +244,7 @@ func (sp *systemProcess) GetMachineData() MachineData {
 }
 
 func (sp *systemProcess) GetExe() (libpf.String, error) {
-	str, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", sp.pid))
+	str, err := os.Readlink(ProcPath(sp.pid, "exe"))
 	if err != nil {
 		return libpf.NullString, err
 	}
@@ -108,13 +254,13 @@ func (sp *systemProcess) GetExe() (libpf.String, error) {
 func (sp *systemProcess) GetProcessMeta(cfg MetaConfig) ProcessMeta {
 	var processName libpf.String
 	exePath, _ := sp.GetExe()
-	if name, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", sp.pid)); err == nil {
+	if name, err := os.ReadFile(ProcPath(sp.pid, "comm")); err == nil {
 		processName = libpf.Intern(pfunsafe.ToString(name))
 	}
 
 	var envVarMap map[libpf.String]libpf.String
 	if len(cfg.IncludeEnvVars) > 0 {
-		if envVars, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", sp.pid)); err == nil {
+		if envVars, err := os.ReadFile(ProcPath(sp.pid, "environ")); err == nil {
 			envVarMap = make(map[libpf.String]libpf.String, len(cfg.IncludeEnvVars))
 			// environ has environment variables separated by a null byte (hex: 00)
 			for envVar := range strings.SplitSeq(pfunsafe.ToString(envVars), "\000") {
@@ -172,7 +318,7 @@ func parseContainerID(cgroupFile io.Reader) libpf.String {
 
 // extractContainerID returns the containerID for pid (supports both cgroup v1 and v2)
 func extractContainerID(pid libpf.PID) (libpf.String, error) {
-	cgroupFile, err := os.Open(fmt.Sprintf("/proc/%d/cgroup", pid))
+	cgroupFile, err := os.Open(ProcPath(pid, "cgroup"))
 	if err != nil {
 		return libpf.NullString, err
 	}
@@ -327,7 +473,7 @@ func iterateMappings(mapsFile io.Reader, callback func(m RawMapping) bool) (uint
 }
 
 func (sp *systemProcess) IterateMappings(callback func(m RawMapping) bool) (uint32, error) {
-	mapsFile, err := os.Open(fmt.Sprintf("/proc/%d/maps", sp.pid))
+	mapsFile, err := os.Open(ProcPath(sp.pid, "maps"))
 	if err != nil {
 		return 0, err
 	}
@@ -365,7 +511,7 @@ func (sp *systemProcess) IterateMappings(callback func(m RawMapping) bool) (uint
 		}
 
 		log.Debugf("TID: %v extracting mappings", sp.tid)
-		mapsFileAlt, err := os.Open(fmt.Sprintf("/proc/%d/task/%d/maps", sp.pid, sp.tid))
+		mapsFileAlt, err := os.Open(fmt.Sprintf("%s/%d/task/%d/maps", ProcFSRoot, sp.pid, sp.tid))
 		// On all errors resulting from trying to get mappings from a different thread,
 		// return ErrNoMappings which will keep the PID tracked in processmanager and
 		// allow for a future iteration to try extracting mappings from a different thread.
@@ -416,10 +562,10 @@ func (sp *systemProcess) getMappingFile(m *RawMapping) string {
 		// Neither /proc/sp.pid/map_files nor /proc/sp.pid/task/sp.tid/map_files
 		// nor /proc/sp.pid/root exist if main thread has exited, so we use the
 		// mapping path directly under the sp.tid root.
-		rootPath := fmt.Sprintf("/proc/%v/task/%v/root", sp.pid, sp.tid)
+		rootPath := fmt.Sprintf("%s/%v/task/%v/root", ProcFSRoot, sp.pid, sp.tid)
 		return path.Join(rootPath, m.Path)
 	}
-	return fmt.Sprintf("/proc/%v/map_files/%x-%x", sp.pid, m.Vaddr, m.Vaddr+m.Length)
+	return fmt.Sprintf("%s/%v/map_files/%x-%x", ProcFSRoot, sp.pid, m.Vaddr, m.Vaddr+m.Length)
 }
 
 func (sp *systemProcess) OpenMappingFile(m *RawMapping) (ReadAtCloser, error) {
@@ -478,5 +624,5 @@ func (sp *systemProcess) OpenELF(file string) (*pfelf.File, error) {
 	}
 
 	// Fall back to opening the file using the process specific root
-	return pfelf.Open(path.Join("/proc", strconv.Itoa(int(sp.pid)), "root", file))
+	return pfelf.Open(path.Join(ProcFSRoot, strconv.Itoa(int(sp.pid)), "root", file))
 }

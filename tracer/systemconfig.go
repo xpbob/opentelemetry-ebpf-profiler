@@ -76,6 +76,46 @@ func getTSDBaseFieldSpec() string {
 	}
 }
 
+// findTaskStruct 从 BTF Spec 中查找 task_struct 结构体。
+// 某些内核（如 TLinux）的 BTF 中可能存在多个同名的 task_struct 定义，
+// 此时 TypeByName 会返回 ErrMultipleMatches，需要使用 AnyTypesByName 逐个尝试。
+func findTaskStruct(spec *btf.Spec) (*btf.Struct, error) {
+	var taskStruct *btf.Struct
+	err := spec.TypeByName("task_struct", &taskStruct)
+	if err == nil {
+		return taskStruct, nil
+	}
+
+	// 如果不是多匹配错误，直接返回
+	if !errors.Is(err, btf.ErrMultipleMatches) {
+		return nil, err
+	}
+
+	// 存在多个 task_struct 定义，逐个尝试找到包含所需字段的那个
+	log.Infof("Multiple task_struct definitions found in BTF, trying to find the correct one")
+	types, err := spec.AnyTypesByName("task_struct")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get task_struct candidates: %v", err)
+	}
+
+	for _, t := range types {
+		st, ok := t.(*btf.Struct)
+		if !ok {
+			continue
+		}
+		// 验证该 task_struct 是否包含 stack 和 thread.fsbase/tp_value 字段
+		if _, err := calculateFieldOffset(st, "stack"); err != nil {
+			continue
+		}
+		if _, err := calculateFieldOffset(st, getTSDBaseFieldSpec()); err != nil {
+			continue
+		}
+		return st, nil
+	}
+
+	return nil, fmt.Errorf("no valid task_struct found among %d candidates", len(types))
+}
+
 // parseBTF resolves the SystemConfig data from kernel BTF
 func parseBTF(vars *sysConfigVars) error {
 	fh, err := os.Open("/sys/kernel/btf/vmlinux")
@@ -89,8 +129,7 @@ func parseBTF(vars *sysConfigVars) error {
 		return err
 	}
 
-	var taskStruct *btf.Struct
-	err = spec.TypeByName("task_struct", &taskStruct)
+	taskStruct, err := findTaskStruct(spec)
 	if err != nil {
 		return err
 	}

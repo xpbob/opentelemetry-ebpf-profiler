@@ -98,6 +98,7 @@ func (p *Pdata) Generate(tree samples.TraceEventsTree,
 			support.TraceOriginOffCPU,
 			support.TraceOriginProbe,
 			support.TraceOriginCuda,
+			support.TraceOriginCudaKernelExec,
 		} {
 			if len(toEvents.Events[origin]) == 0 {
 				// Do not append empty profiles.
@@ -160,8 +161,14 @@ func (p *Pdata) setProfile(
 		pt.SetTypeStrindex(stringSet.Add("cpu"))
 		pt.SetUnitStrindex(stringSet.Add("nanoseconds"))
 
-		st.SetTypeStrindex(stringSet.Add("samples"))
-		st.SetUnitStrindex(stringSet.Add("count"))
+		if p.enableTime {
+			// enableTime 开启时，将采样次数转换为时间（ms）
+			st.SetTypeStrindex(stringSet.Add("cpu"))
+			st.SetUnitStrindex(stringSet.Add("milliseconds"))
+		} else {
+			st.SetTypeStrindex(stringSet.Add("samples"))
+			st.SetUnitStrindex(stringSet.Add("count"))
+		}
 	case support.TraceOriginOffCPU:
 		st.SetTypeStrindex(stringSet.Add("off_cpu"))
 		st.SetUnitStrindex(stringSet.Add("nanoseconds"))
@@ -171,6 +178,9 @@ func (p *Pdata) setProfile(
 	case support.TraceOriginCuda:
 		st.SetTypeStrindex(stringSet.Add("cuda_events"))
 		st.SetUnitStrindex(stringSet.Add("count"))
+	case support.TraceOriginCudaKernelExec:
+		st.SetTypeStrindex(stringSet.Add("cuda_kernel_exec"))
+		st.SetUnitStrindex(stringSet.Add("nanoseconds"))
 	default:
 		// Should never happen
 		return fmt.Errorf("generating profile for unsupported origin %d", origin)
@@ -182,6 +192,11 @@ func (p *Pdata) setProfile(
 		sample.TimestampsUnixNano().FromRaw(traceInfo.Timestamps)
 		if origin == support.TraceOriginOffCPU {
 			sample.Values().Append(traceInfo.OffTimes...)
+		}
+		// enableTime 开启时，将 CPU 采样的采样次数转换为时间（ms）
+		if p.enableTime && origin == support.TraceOriginSampling && p.samplesPerSecond > 0 {
+			timeMs := int64(len(traceInfo.Timestamps)) * 1000 / int64(p.samplesPerSecond)
+			sample.Values().Append(timeMs)
 		}
 
 		if sampleKey.SpanID != libpf.InvalidAPMSpanID &&

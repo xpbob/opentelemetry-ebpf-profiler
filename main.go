@@ -19,6 +19,7 @@ import (
 
 	"go.opentelemetry.io/ebpf-profiler/internal/controller"
 	"go.opentelemetry.io/ebpf-profiler/metrics"
+	"go.opentelemetry.io/ebpf-profiler/process"
 	"go.opentelemetry.io/ebpf-profiler/reporter"
 	"go.opentelemetry.io/ebpf-profiler/times"
 	"go.opentelemetry.io/ebpf-profiler/vc"
@@ -107,6 +108,38 @@ func mainWithExitCode() exitCode {
 
 	metrics.Start(noop.Meter{})
 
+	// 设置 procfs 根路径（必须在 NewFileReporter 之前，因为 resolveHostPID 依赖此设置）。
+	// 支持通过 -host-proc 参数指定（容器场景），也支持通过 HOST_PROC 环境变量设置。
+	// 优先级：命令行参数 > 环境变量 > 默认值 "/proc"
+	hostProc := cfg.HostProc
+	if hostProc == "" || hostProc == "/proc" {
+		if envProc := os.Getenv("HOST_PROC"); envProc != "" {
+			hostProc = envProc
+		}
+	}
+	if hostProc != "" && hostProc != "/proc" {
+		// 验证路径是否存在
+		if info, err := os.Stat(hostProc); err != nil {
+			log.Warnf("指定的 host-proc 路径 %s 不存在或无法访问: %v，将使用默认 /proc", hostProc, err)
+		} else if !info.IsDir() {
+			log.Warnf("指定的 host-proc 路径 %s 不是目录，将使用默认 /proc", hostProc)
+		} else {
+			process.ProcFSRoot = hostProc
+			log.Infof("Using host procfs at %s (container mode)", hostProc)
+		}
+	}
+
+	// 统一做 PID 转换：将用户传入的 namespace PID 转换为宿主机 PID。
+	// 必须在设置 ProcFSRoot 之后、创建 reporter 和 controller 之前执行，
+	// 确保 FileReporter 的 PID 过滤和 StartCudaProfiling 的 uprobe 挂载都使用宿主机 PID。
+	if cfg.TargetPID > 0 {
+		resolvedPID := process.ResolveHostPID(cfg.TargetPID)
+		if resolvedPID != cfg.TargetPID {
+			log.Infof("目标 PID 已从 %d 转换为宿主机 PID %d", cfg.TargetPID, resolvedPID)
+			cfg.TargetPID = resolvedPID
+		}
+	}
+
 	// 判断是否为定时采样模式（指定了 -duration 和 -output）
 	isTimedMode := cfg.Duration > 0 && cfg.OutputFile != ""
 
@@ -117,6 +150,7 @@ func mainWithExitCode() exitCode {
 			Name:             os.Args[0],
 			Version:          vc.Version(),
 			SamplesPerSecond: cfg.SamplesPerSecond,
+			EnableTime:       cfg.IsEnableTime(),
 		}, cfg.TargetPID, cfg.OutputFile, reporter.FileType(cfg.FileType))
 		if fileErr != nil {
 			log.Error(fileErr)
@@ -140,6 +174,7 @@ func mainWithExitCode() exitCode {
 			ReportInterval:         intervals.ReportInterval(),
 			ReportJitter:           cfg.ReporterJitter,
 			SamplesPerSecond:       cfg.SamplesPerSecond,
+			EnableTime:             cfg.IsEnableTime(),
 		})
 		if otlpErr != nil {
 			log.Error(otlpErr)
@@ -167,6 +202,33 @@ func mainWithExitCode() exitCode {
 			log.Infof("采样时间 %v 已到，正在停止采集...", cfg.Duration)
 		case <-ctx.Done():
 			log.Info("收到终止信号，提前停止采集...")
+		}
+
+		// 当启用了 CUDA 时，执行三阶段停止：
+		// 阶段 1：停止 CPU 采样和 cuda_correlation 探针，保留 kernel_executed
+		// 阶段 2：等待 5 秒让 kernel_executed 继续消费匹配的 CUDA kernel 执行数据
+		// 阶段 3：停止 kernel_executed，flush 所有 pending 数据，再生成文件
+		if cfg.EnableCuda {
+			log.Info("CUDA 模式：停止 CPU 采样和 cuda_correlation，保留 kernel_executed 继续消费...")
+			ctlr.StopCPUAndCorrelation()
+
+			log.Info("等待 5 秒让 kernel_executed 消费剩余的 CUDA kernel 执行数据...")
+			select {
+			case <-time.After(5 * time.Second):
+				log.Info("等待完成")
+			case <-ctx.Done():
+				log.Info("收到终止信号，立即停止...")
+			}
+
+			// 阶段 3：停止 kernel_executed 探针
+			pendingCount := ctlr.PendingCudaCorrelationCount()
+			log.Infof("停止 kernel_executed 探针，当前剩余未匹配 correlation: %d", pendingCount)
+			ctlr.StopKernelExecuted()
+
+			// flush 所有未匹配的 pending correlation 数据
+			log.Info("正在 flush 所有未匹配的 CUDA correlation 数据...")
+			ctlr.FlushPendingCudaCorrelations()
+			log.Info("CUDA 数据消费完成，正在生成结果文件...")
 		}
 	} else {
 		// 常规模式：等待信号终止

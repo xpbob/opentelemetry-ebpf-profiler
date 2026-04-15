@@ -48,4 +48,8 @@ type Config struct {
 	// GRPCDialOptions allows passing additional gRPC dial options when establishing
 	// the connection to the collector. These options are appended after the default options.
 	GRPCDialOptions []grpc.DialOption
+
+	// EnableTime 开启后，将 CPU 采样的采样次数转换为时间（ms）。
+	// 仅对 CPU 采样（TraceOriginSampling）生效。
+	EnableTime bool
 }

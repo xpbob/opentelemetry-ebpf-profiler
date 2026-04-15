@@ -88,11 +88,12 @@ const (
 )
 
 const (
-	TraceOriginUnknown  = 0x0
-	TraceOriginSampling = 0x1
-	TraceOriginOffCPU   = 0x2
-	TraceOriginProbe    = 0x3
-	TraceOriginCuda     = 0x4
+	TraceOriginUnknown        = 0x0
+	TraceOriginSampling       = 0x1
+	TraceOriginOffCPU         = 0x2
+	TraceOriginProbe          = 0x3
+	TraceOriginCuda           = 0x4
+	TraceOriginCudaKernelExec = 0x5
 )
 
 type ApmSpanID [8]byte

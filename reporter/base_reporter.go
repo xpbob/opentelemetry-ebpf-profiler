@@ -52,6 +52,7 @@ func (b *baseReporter) ReportTraceEvent(trace *libpf.Trace, meta *samples.TraceE
 	case support.TraceOriginOffCPU:
 	case support.TraceOriginProbe:
 	case support.TraceOriginCuda:
+	case support.TraceOriginCudaKernelExec:
 	default:
 		return fmt.Errorf("skip reporting trace for %d origin: %w", meta.Origin,
 			errUnknownOrigin)

@@ -57,6 +57,7 @@ type ProbeSpec struct {
 
 const genericProgName = "kprobe__generic"
 const cudaProgName = "usdt__cuda_correlation"
+const cudaKernelExecProgName = "usdt__kernel_executed"
 
 // ParseProbe parses a probe specification string and returns a ProbeSpec.
 //

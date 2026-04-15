@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/internal/log"
 	"go.opentelemetry.io/ebpf-profiler/libpf"
 	"go.opentelemetry.io/ebpf-profiler/reporter/samples"
+	"go.opentelemetry.io/ebpf-profiler/support"
 )
 
 // pprofWriter 将采样数据转换为 pprof 格式（profile.proto）。
@@ -25,6 +26,9 @@ type pprofWriter struct {
 	// 采样频率（Hz）
 	samplesPerSecond int
 
+	// enableTime 开启后，将 CPU 采样的采样次数转换为时间（ms）
+	enableTime bool
+
 	// 去重用的 map
 	functionMap  map[string]*pprofProfile.Function // funcKey -> Function
 	locationMap  map[string]*pprofProfile.Location  // locKey -> Location
@@ -35,10 +39,11 @@ type pprofWriter struct {
 }
 
 // newPprofWriter 创建一个新的 pprofWriter 实例。
-func newPprofWriter(startTime time.Time, samplesPerSecond int) *pprofWriter {
+func newPprofWriter(startTime time.Time, samplesPerSecond int, enableTime bool) *pprofWriter {
 	return &pprofWriter{
 		startTime:        startTime,
 		samplesPerSecond: samplesPerSecond,
+		enableTime:       enableTime,
 		functionMap:      make(map[string]*pprofProfile.Function),
 		locationMap:      make(map[string]*pprofProfile.Location),
 		nextFunctionID:   1,
@@ -110,7 +115,7 @@ func (w *pprofWriter) buildProfile(reportedEvents samples.TraceEventsTree, durat
 
 	// 遍历所有采样事件
 	for _, resourceToProfiles := range reportedEvents {
-		for _, sampleToEvents := range resourceToProfiles.Events {
+		for origin, sampleToEvents := range resourceToProfiles.Events {
 			for sampleKey, traceEvents := range sampleToEvents {
 				if traceEvents == nil || len(traceEvents.Timestamps) == 0 {
 					continue
@@ -122,9 +127,14 @@ func (w *pprofWriter) buildProfile(reportedEvents samples.TraceEventsTree, durat
 				// 采样次数
 				count := int64(len(traceEvents.Timestamps))
 
-				// 每个采样的 CPU 时间（纳秒）= count * period
+				// 计算 CPU 时间值
 				var cpuNanos int64
-				if w.samplesPerSecond > 0 {
+				if w.enableTime && origin == support.TraceOriginSampling &&
+					w.samplesPerSecond > 0 {
+					// enableTime 开启且为 CPU 采样：将采样次数转换为时间（ms），
+					// 存储为纳秒以保持 pprof 格式一致性
+					cpuNanos = count * (int64(time.Second) / int64(w.samplesPerSecond))
+				} else if origin == support.TraceOriginSampling && w.samplesPerSecond > 0 {
 					cpuNanos = count * (int64(time.Second) / int64(w.samplesPerSecond))
 				}
 

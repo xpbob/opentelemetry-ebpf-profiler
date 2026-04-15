@@ -18,6 +18,7 @@ import (
 	pmebpf "go.opentelemetry.io/ebpf-profiler/processmanager/ebpfapi"
 	eim "go.opentelemetry.io/ebpf-profiler/processmanager/execinfomanager"
 	"go.opentelemetry.io/ebpf-profiler/reporter"
+	"go.opentelemetry.io/ebpf-profiler/reporter/samples"
 	"go.opentelemetry.io/ebpf-profiler/times"
 	"go.opentelemetry.io/ebpf-profiler/util"
 )
@@ -38,6 +39,30 @@ type frameCacheKey struct {
 	pid libpf.PID
 	// data is the frame data: frame header and the two first variable fields
 	data [3]uint64
+}
+
+// pendingCudaCorrelation 保存 cuda_correlation 触发时的栈帧和元数据，
+// 等待 kernel_executed 触发时根据 correlationId 进行关联。
+type pendingCudaCorrelation struct {
+	// trace 是 cuda_correlation 触发时采集的完整栈帧。
+	trace *libpf.Trace
+	// meta 是 trace 的元数据。
+	meta *samples.TraceEventMeta
+	// timestampMs 是 cuda_correlation 触发时的 13 位毫秒时间戳。
+	timestampMs int64
+	// cudaName 是 CUDA kernel 的名称。
+	cudaName string
+}
+
+// pendingKernelExecuted 保存 kernel_executed 先于 cuda_correlation 到达时的数据，
+// 等待对应的 cuda_correlation 到达后进行反向匹配。
+type pendingKernelExecuted struct {
+	// start 是 GPU kernel 执行的起始时间戳（纳秒）。
+	start uint64
+	// end 是 GPU kernel 执行的结束时间戳（纳秒）。
+	end uint64
+	// timestampMs 是 kernel_executed 到达时的 13 位毫秒时间戳，用于超时清理。
+	timestampMs int64
 }
 
 // ProcessManager is responsible for managing the events happening throughout the lifespan of a
@@ -113,6 +138,14 @@ type ProcessManager struct {
 
 	// includeEnvVars holds a list of env vars that should be captured from processes
 	includeEnvVars libpf.Set[string]
+
+	// pendingCudaCorrelations 保存 cuda_correlation 触发但尚未匹配 kernel_executed 的记录。
+	// key 是 correlationId（uint64）。
+	pendingCudaCorrelations map[uint64]*pendingCudaCorrelation
+
+	// pendingKernelExecuted 保存 kernel_executed 先于 cuda_correlation 到达时的数据。
+	// key 是 correlationId（uint64）。
+	pendingKernelExecuted map[uint64]*pendingKernelExecuted
 }
 
 // Mapping represents an executable memory mapping of a process.

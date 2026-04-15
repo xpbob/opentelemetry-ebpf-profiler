@@ -62,7 +62,7 @@ func isPIDLive(pid libpf.PID) (bool, error) {
 		}
 	}
 
-	path := fmt.Sprintf("/proc/%d/maps", pid)
+	path := fmt.Sprintf("%s/%d/maps", process.ProcFSRoot, pid)
 	_, err = os.Stat(path)
 	if err != nil && os.IsNotExist(err) {
 		return false, nil

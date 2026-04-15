@@ -14,8 +14,10 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/internal/log"
 	"go.opentelemetry.io/ebpf-profiler/libpf"
 	"go.opentelemetry.io/ebpf-profiler/libpf/xsync"
+	"go.opentelemetry.io/ebpf-profiler/process"
 	"go.opentelemetry.io/ebpf-profiler/reporter/internal/pdata"
 	"go.opentelemetry.io/ebpf-profiler/reporter/samples"
+	"go.opentelemetry.io/ebpf-profiler/support"
 )
 
 // FileType 定义输出文件格式类型。
@@ -49,6 +51,12 @@ type FileReporter struct {
 	fileType FileType
 }
 
+// resolveHostPID 将用户传入的 PID 转换为宿主机 PID。
+// 委托给 process.ResolveHostPID 实现。
+func resolveHostPID(pid int) int {
+	return process.ResolveHostPID(pid)
+}
+
 // NewFileReporter 创建一个新的 FileReporter 实例。
 // targetPID 为 0 时不进行 PID 过滤。
 // fileType 指定输出格式："folded"（默认）、"jfr" 或 "pprof"。
@@ -60,9 +68,14 @@ func NewFileReporter(cfg *Config, targetPID int, outputFile string, fileType Fil
 	if fileType != FileTypeFolded && fileType != FileTypeJFR && fileType != FileTypePprof {
 		return nil, fmt.Errorf("不支持的文件格式: %s，支持的格式: folded, jfr, pprof", fileType)
 	}
+
+	// 将用户传入的 PID 转换为宿主机 PID，
+	// 确保在容器内运行时能正确匹配 eBPF 报告的宿主机 PID。
+	hostPID := resolveHostPID(targetPID)
 	data, err := pdata.New(
 		cfg.SamplesPerSecond,
 		cfg.ExtraSampleAttrProd,
+		cfg.EnableTime,
 	)
 	if err != nil {
 		return nil, err
@@ -81,7 +94,7 @@ func NewFileReporter(cfg *Config, targetPID int, outputFile string, fileType Fil
 				stopSignal: make(chan libpf.Void),
 			},
 		},
-		targetPID:  libpf.PID(targetPID),
+		targetPID:  libpf.PID(hostPID),
 		outputFile: outputFile,
 		fileType:   fileType,
 	}, nil
@@ -176,7 +189,7 @@ func (r *FileReporter) writeOutputFile() error {
 
 	// 遍历所有资源和事件，生成 folded 格式输出
 	for _, resourceToProfiles := range reportedEvents {
-		for _, sampleToEvents := range resourceToProfiles.Events {
+		for origin, sampleToEvents := range resourceToProfiles.Events {
 			for sampleKey, traceEvents := range sampleToEvents {
 				if traceEvents == nil || len(traceEvents.Timestamps) == 0 {
 					continue
@@ -184,6 +197,16 @@ func (r *FileReporter) writeOutputFile() error {
 
 				// 采样次数 = Timestamps 的长度
 				count := len(traceEvents.Timestamps)
+
+				// 计算输出值：
+				// 当 enableTime 开启且为 CPU 采样时，将采样次数转换为时间（ms）
+				// 转换规则：count * (1000 / samplesPerSecond)
+				// 对 USDT、uprobe 等其他 origin 不做转换
+				outputValue := count
+				if r.cfg.EnableTime && origin == support.TraceOriginSampling &&
+					r.cfg.SamplesPerSecond > 0 {
+					outputValue = count * 1000 / r.cfg.SamplesPerSecond
+				}
 
 				// 构建栈帧列表（eBPF 采集的栈帧是从叶子到根，需要反转为从根到叶子）
 				frames := traceEvents.Frames
@@ -203,9 +226,9 @@ func (r *FileReporter) writeOutputFile() error {
 				var line string
 				if len(frameStrs) > 0 {
 					line = fmt.Sprintf("%s;%s %d\n", comm,
-						strings.Join(frameStrs, ";"), count)
+						strings.Join(frameStrs, ";"), outputValue)
 				} else {
-					line = fmt.Sprintf("%s %d\n", comm, count)
+					line = fmt.Sprintf("%s %d\n", comm, outputValue)
 				}
 
 				if _, err := w.WriteString(line); err != nil {
@@ -235,7 +258,7 @@ func (r *FileReporter) writePprofOutputFile() error {
 	r.traceEvents.WUnlock(&traceEventsPtr)
 
 	duration := time.Since(r.collectionStartTime)
-	pw := newPprofWriter(r.collectionStartTime, r.cfg.SamplesPerSecond)
+	pw := newPprofWriter(r.collectionStartTime, r.cfg.SamplesPerSecond, r.cfg.EnableTime)
 
 	return pw.writePprofFile(r.outputFile, reportedEvents, duration.Nanoseconds())
 }
