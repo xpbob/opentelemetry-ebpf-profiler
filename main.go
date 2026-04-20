@@ -151,6 +151,7 @@ func mainWithExitCode() exitCode {
 			Version:          vc.Version(),
 			SamplesPerSecond: cfg.SamplesPerSecond,
 			EnableTime:       cfg.IsEnableTime(),
+			TimeUnit:         cfg.GetTimeUnit(),
 		}, cfg.TargetPID, cfg.OutputFile, reporter.FileType(cfg.FileType))
 		if fileErr != nil {
 			log.Error(fileErr)
@@ -175,6 +176,7 @@ func mainWithExitCode() exitCode {
 			ReportJitter:           cfg.ReporterJitter,
 			SamplesPerSecond:       cfg.SamplesPerSecond,
 			EnableTime:             cfg.IsEnableTime(),
+			TimeUnit:               cfg.GetTimeUnit(),
 		})
 		if otlpErr != nil {
 			log.Error(otlpErr)

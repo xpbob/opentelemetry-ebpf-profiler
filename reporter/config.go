@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 
 	"go.opentelemetry.io/ebpf-profiler/reporter/samples"
+	"go.opentelemetry.io/ebpf-profiler/support"
 )
 
 type Config struct {
@@ -49,7 +50,11 @@ type Config struct {
 	// the connection to the collector. These options are appended after the default options.
 	GRPCDialOptions []grpc.DialOption
 
-	// EnableTime 开启后，将 CPU 采样的采样次数转换为时间（ms）。
+	// EnableTime 开启后，将 CPU 采样的采样次数转换为时间。
 	// 仅对 CPU 采样（TraceOriginSampling）生效。
 	EnableTime bool
+
+	// TimeUnit 指定 enable-time 开启后的时间转化单位。
+	// 默认为 "ns"（纳秒），支持 "us"（微秒）、"ms"（毫秒）。
+	TimeUnit support.TimeUnit
 }

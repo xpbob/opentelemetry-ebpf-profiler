@@ -194,7 +194,13 @@ func (w *jfrWriter) getOrCreateThread(name string) int64 {
 
 // addSamples 将 profiling 数据转换为 JFR 采样事件。
 func (w *jfrWriter) addSamples(reportedEvents samples.TraceEventsTree) {
-	for _, resourceToProfiles := range reportedEvents {
+	for resourceKey, resourceToProfiles := range reportedEvents {
+		// 为每个资源（进程）创建一个 ELF 符号解析器
+		var resolver *elfSymbolResolver
+		if resourceKey.PID > 0 {
+			resolver = newElfSymbolResolver(resourceKey.PID)
+		}
+
 		for _, sampleToEvents := range resourceToProfiles.Events {
 			for sampleKey, traceEvents := range sampleToEvents {
 				if traceEvents == nil || len(traceEvents.Timestamps) == 0 {
@@ -209,7 +215,7 @@ func (w *jfrWriter) addSamples(reportedEvents samples.TraceEventsTree) {
 				threadID := w.getOrCreateThread(comm)
 
 				// 构建栈帧并获取 stackTrace ID
-				stackTraceID := w.buildStackTrace(traceEvents.Frames)
+				stackTraceID := w.buildStackTrace(traceEvents.Frames, resolver)
 
 				// 为每个采样时间戳创建一个 ExecutionSample 事件
 				for _, ts := range traceEvents.Timestamps {
@@ -226,7 +232,8 @@ func (w *jfrWriter) addSamples(reportedEvents samples.TraceEventsTree) {
 }
 
 // buildStackTrace 将 eBPF 栈帧转换为 JFR 栈帧，并返回 stackTrace ID。
-func (w *jfrWriter) buildStackTrace(frames libpf.Frames) int64 {
+// resolver 可以为 nil，此时不进行本地 ELF 符号化。
+func (w *jfrWriter) buildStackTrace(frames libpf.Frames, resolver *elfSymbolResolver) int64 {
 	// 构建栈帧的唯一 key
 	var keyBuf bytes.Buffer
 	jfrFrames := make([]jfrStackFrame, 0, len(frames))
@@ -259,7 +266,17 @@ func (w *jfrWriter) buildStackTrace(frames libpf.Frames) int64 {
 		} else if frame.Mapping.Valid() {
 			mf := frame.Mapping.Value().File.Value()
 			className = mf.FileName.String()
-			methodName = fmt.Sprintf("0x%x", frame.AddressOrLineno)
+
+			// 尝试通过 ELF 符号表解析函数名
+			if resolver != nil && className != "" {
+				if resolved := resolver.resolve(className, uint64(frame.AddressOrLineno)); resolved != "" {
+					methodName = resolved
+				} else {
+					methodName = fmt.Sprintf("0x%x", frame.AddressOrLineno)
+				}
+			} else {
+				methodName = fmt.Sprintf("0x%x", frame.AddressOrLineno)
+			}
 			frameTypeName = "Native"
 		} else {
 			className = "[unknown]"

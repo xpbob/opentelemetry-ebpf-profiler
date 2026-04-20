@@ -162,9 +162,9 @@ func (p *Pdata) setProfile(
 		pt.SetUnitStrindex(stringSet.Add("nanoseconds"))
 
 		if p.enableTime {
-			// enableTime 开启时，将采样次数转换为时间（ms）
+			// enableTime 开启时，将采样次数转换为指定单位的时间
 			st.SetTypeStrindex(stringSet.Add("cpu"))
-			st.SetUnitStrindex(stringSet.Add("milliseconds"))
+			st.SetUnitStrindex(stringSet.Add(string(p.timeUnit)))
 		} else {
 			st.SetTypeStrindex(stringSet.Add("samples"))
 			st.SetUnitStrindex(stringSet.Add("count"))
@@ -176,8 +176,9 @@ func (p *Pdata) setProfile(
 		st.SetTypeStrindex(stringSet.Add("events"))
 		st.SetUnitStrindex(stringSet.Add("count"))
 	case support.TraceOriginCuda:
-		st.SetTypeStrindex(stringSet.Add("cuda_events"))
-		st.SetUnitStrindex(stringSet.Add("count"))
+		// CUDA 中间阶段以毫秒为单位存储，导出时根据 timeUnit 转换
+		st.SetTypeStrindex(stringSet.Add("cuda_gpu_time"))
+		st.SetUnitStrindex(stringSet.Add(string(p.timeUnit)))
 	case support.TraceOriginCudaKernelExec:
 		st.SetTypeStrindex(stringSet.Add("cuda_kernel_exec"))
 		st.SetUnitStrindex(stringSet.Add("nanoseconds"))
@@ -193,10 +194,20 @@ func (p *Pdata) setProfile(
 		if origin == support.TraceOriginOffCPU {
 			sample.Values().Append(traceInfo.OffTimes...)
 		}
-		// enableTime 开启时，将 CPU 采样的采样次数转换为时间（ms）
+		// enableTime 开启时，将 CPU 采样的采样次数转换为指定单位的时间
 		if p.enableTime && origin == support.TraceOriginSampling && p.samplesPerSecond > 0 {
-			timeMs := int64(len(traceInfo.Timestamps)) * 1000 / int64(p.samplesPerSecond)
-			sample.Values().Append(timeMs)
+			nanoDivisor := p.timeUnit.NanoDivisor()
+			timeVal := int64(len(traceInfo.Timestamps)) * (1_000_000_000 / int64(p.samplesPerSecond)) / nanoDivisor
+			sample.Values().Append(timeVal)
+		}
+		// CUDA 的 GPU 执行时间以纳秒存储在 GpuDurationNs 中，导出时转换为目标单位
+		if origin == support.TraceOriginCuda {
+			nanoDivisor := p.timeUnit.NanoDivisor()
+			timeVal := traceInfo.GpuDurationNs / nanoDivisor
+			if timeVal == 0 && traceInfo.GpuDurationNs > 0 {
+				timeVal = 1
+			}
+			sample.Values().Append(timeVal)
 		}
 
 		if sampleKey.SpanID != libpf.InvalidAPMSpanID &&

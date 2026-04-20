@@ -13,6 +13,7 @@ import (
 
 	"go.opentelemetry.io/ebpf-profiler/collector/config"
 	"go.opentelemetry.io/ebpf-profiler/internal/controller"
+	"go.opentelemetry.io/ebpf-profiler/support"
 	"go.opentelemetry.io/ebpf-profiler/tracer"
 )
 
@@ -103,10 +104,13 @@ var (
 		"Requires Linux 5.4+ kernel. Only effective in CPU sampling mode."
 	cudaBinaryHelp = "Path to the binary (e.g. shared library .so) containing the USDT probe " +
 		"parcagpu:cuda_correlation. If not specified, defaults to /proc/<pid>/exe."
-	enableTimeHelp = "Enable converting CPU sampling counts to time (ms). " +
-		"When enabled, the sample count for CPU profiling is converted to time using: count * (1000 / samples-per-second). " +
+	enableTimeHelp = "Enable converting CPU sampling counts to time. " +
+		"When enabled, the sample count for CPU profiling is converted to time using the unit specified by -time-unit. " +
 		"Only affects CPU sampling, not USDT or uprobe events. " +
 		"Defaults to true when -enable-cuda is set, otherwise defaults to false."
+	timeUnitHelp = "Set the time unit for -enable-time conversion. " +
+		"Supported values: 'ns' (nanoseconds, default), 'us' (microseconds), 'ms' (milliseconds). " +
+		"Only effective when -enable-time is enabled."
 )
 
 // Package-scope variable, so that conditionally compiled other components can refer
@@ -187,6 +191,9 @@ func parseArgs() (*controller.Config, error) {
 	var enableTime bool
 	fs.BoolVar(&enableTime, "enable-time", false, enableTimeHelp)
 
+	var timeUnit string
+	fs.StringVar(&timeUnit, "time-unit", "ns", timeUnitHelp)
+
 	fs.Usage = func() {
 		fs.PrintDefaults()
 	}
@@ -226,6 +233,15 @@ func parseArgs() (*controller.Config, error) {
 		args.EnableTime = &defaultEnableTime
 	}
 	// 否则 args.EnableTime 保持 nil（等同于 false）
+
+	// 设置时间单位，默认为 ns
+	if timeUnit == "" {
+		timeUnit = "ns"
+	}
+	if !support.ValidTimeUnit(timeUnit) {
+		return nil, fmt.Errorf("invalid time-unit %q, supported values: ns, us, ms", timeUnit)
+	}
+	args.TimeUnit = support.TimeUnit(timeUnit)
 
 	return &args, nil
 }

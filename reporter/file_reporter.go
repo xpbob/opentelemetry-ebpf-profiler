@@ -76,6 +76,7 @@ func NewFileReporter(cfg *Config, targetPID int, outputFile string, fileType Fil
 		cfg.SamplesPerSecond,
 		cfg.ExtraSampleAttrProd,
 		cfg.EnableTime,
+		cfg.TimeUnit,
 	)
 	if err != nil {
 		return nil, err
@@ -142,8 +143,10 @@ func (r *FileReporter) ReportTraceEvent(trace *libpf.Trace, meta *samples.TraceE
 }
 
 // formatFrame 将单个栈帧格式化为可读字符串。
-// 优先使用函数名，如果没有函数名则使用 mapping 文件名+偏移，最后使用地址。
-func formatFrame(frame *libpf.Frame) string {
+// 优先使用函数名，如果没有函数名则尝试通过 ELF 符号表解析，
+// 最后 fallback 到 mapping 文件名+偏移或纯地址。
+// resolver 可以为 nil，此时不进行本地符号化。
+func formatFrame(frame *libpf.Frame, resolver *elfSymbolResolver) string {
 	if frame.Type.IsError() {
 		if frame.Type.IsAbort() {
 			return fmt.Sprintf("[abort:0x%x]", frame.AddressOrLineno)
@@ -161,7 +164,16 @@ func formatFrame(frame *libpf.Frame) string {
 
 	if frame.Mapping.Valid() {
 		mf := frame.Mapping.Value().File.Value()
-		return fmt.Sprintf("%s+0x%x", mf.FileName, frame.AddressOrLineno)
+		fileName := mf.FileName.String()
+
+		// 尝试通过 ELF 符号表解析函数名
+		if resolver != nil && fileName != "" {
+			if funcName := resolver.resolve(fileName, uint64(frame.AddressOrLineno)); funcName != "" {
+				return funcName
+			}
+		}
+
+		return fmt.Sprintf("%s+0x%x", fileName, frame.AddressOrLineno)
 	}
 
 	return fmt.Sprintf("0x%x", frame.AddressOrLineno)
@@ -188,7 +200,13 @@ func (r *FileReporter) writeOutputFile() error {
 	totalStacks := 0
 
 	// 遍历所有资源和事件，生成 folded 格式输出
-	for _, resourceToProfiles := range reportedEvents {
+	for resourceKey, resourceToProfiles := range reportedEvents {
+		// 为每个资源（进程）创建一个 ELF 符号解析器
+		var resolver *elfSymbolResolver
+		if resourceKey.PID > 0 {
+			resolver = newElfSymbolResolver(resourceKey.PID)
+		}
+
 		for origin, sampleToEvents := range resourceToProfiles.Events {
 			for sampleKey, traceEvents := range sampleToEvents {
 				if traceEvents == nil || len(traceEvents.Timestamps) == 0 {
@@ -199,13 +217,22 @@ func (r *FileReporter) writeOutputFile() error {
 				count := len(traceEvents.Timestamps)
 
 				// 计算输出值：
-				// 当 enableTime 开启且为 CPU 采样时，将采样次数转换为时间（ms）
-				// 转换规则：count * (1000 / samplesPerSecond)
+				// 当 enableTime 开启且为 CPU 采样时，将采样次数转换为时间
+				// 转换规则：count * (1e9 / samplesPerSecond) / nanoDivisor
+				// 对 CUDA origin，中间阶段以毫秒为单位存储，导出时转换为目标单位
 				// 对 USDT、uprobe 等其他 origin 不做转换
 				outputValue := count
 				if r.cfg.EnableTime && origin == support.TraceOriginSampling &&
 					r.cfg.SamplesPerSecond > 0 {
-					outputValue = count * 1000 / r.cfg.SamplesPerSecond
+					nanoDivisor := r.cfg.TimeUnit.NanoDivisor()
+					outputValue = count * (1_000_000_000 / r.cfg.SamplesPerSecond) / int(nanoDivisor)
+				} else if origin == support.TraceOriginCuda {
+					// CUDA 的 GPU 执行时间以纳秒存储在 GpuDurationNs 中，转换为目标单位
+					nanoDivisor := r.cfg.TimeUnit.NanoDivisor()
+					outputValue = int(traceEvents.GpuDurationNs / nanoDivisor)
+					if outputValue == 0 && traceEvents.GpuDurationNs > 0 {
+						outputValue = 1
+					}
 				}
 
 				// 构建栈帧列表（eBPF 采集的栈帧是从叶子到根，需要反转为从根到叶子）
@@ -213,7 +240,7 @@ func (r *FileReporter) writeOutputFile() error {
 				frameStrs := make([]string, 0, len(frames))
 				for i := len(frames) - 1; i >= 0; i-- {
 					frame := frames[i].Value()
-					frameStrs = append(frameStrs, formatFrame(&frame))
+					frameStrs = append(frameStrs, formatFrame(&frame, resolver))
 				}
 
 				// 构建 folded 行: "comm;frame1;frame2;...;frameN count"
@@ -258,7 +285,7 @@ func (r *FileReporter) writePprofOutputFile() error {
 	r.traceEvents.WUnlock(&traceEventsPtr)
 
 	duration := time.Since(r.collectionStartTime)
-	pw := newPprofWriter(r.collectionStartTime, r.cfg.SamplesPerSecond, r.cfg.EnableTime)
+	pw := newPprofWriter(r.collectionStartTime, r.cfg.SamplesPerSecond, r.cfg.EnableTime, r.cfg.TimeUnit)
 
 	return pw.writePprofFile(r.outputFile, reportedEvents, duration.Nanoseconds())
 }

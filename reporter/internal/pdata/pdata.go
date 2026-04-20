@@ -5,6 +5,7 @@ package pdata // import "go.opentelemetry.io/ebpf-profiler/reporter/internal/pda
 
 import (
 	"go.opentelemetry.io/ebpf-profiler/reporter/samples"
+	"go.opentelemetry.io/ebpf-profiler/support"
 )
 
 // Pdata holds the cache for the data used to generate the events reporters
@@ -17,15 +18,19 @@ type Pdata struct {
 	// samplesPerSecond is the number of samples per second.
 	samplesPerSecond int
 
-	// enableTime 开启后，将 CPU 采样的采样次数转换为时间（ms）。
+	// enableTime 开启后，将 CPU 采样的采样次数转换为时间。
 	enableTime bool
+
+	// timeUnit 时间转化单位。
+	timeUnit support.TimeUnit
 }
 
-func New(samplesPerSecond int, extra samples.SampleAttrProducer, enableTime bool) (*Pdata, error) {
+func New(samplesPerSecond int, extra samples.SampleAttrProducer, enableTime bool, timeUnit support.TimeUnit) (*Pdata, error) {
 	return &Pdata{
 		samplesPerSecond:    samplesPerSecond,
 		ExtraSampleAttrProd: extra,
 		enableTime:          enableTime,
+		timeUnit:            timeUnit,
 	}, nil
 }
 

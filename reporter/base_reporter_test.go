@@ -29,7 +29,7 @@ func createTestBaseReporter(t *testing.T, cfg *Config) *baseReporter {
 		}
 	}
 
-	pdataInstance, err := pdata.New(cfg.SamplesPerSecond, cfg.ExtraSampleAttrProd, false)
+	pdataInstance, err := pdata.New(cfg.SamplesPerSecond, cfg.ExtraSampleAttrProd, false, support.TimeUnitNS)
 	require.NoError(t, err)
 
 	return &baseReporter{

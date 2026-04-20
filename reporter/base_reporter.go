@@ -95,14 +95,16 @@ func (b *baseReporter) ReportTraceEvent(trace *libpf.Trace, meta *samples.TraceE
 	if events, exists := rtp.Events[meta.Origin][sampleKey]; exists {
 		events.Timestamps = append(events.Timestamps, uint64(meta.Timestamp))
 		events.OffTimes = append(events.OffTimes, meta.OffTime)
+		events.GpuDurationNs += meta.GpuDurationNs
 		return nil
 	}
 
 	rtp.Events[meta.Origin][sampleKey] = &samples.TraceEvents{
-		Frames:     trace.Frames,
-		Timestamps: []uint64{uint64(meta.Timestamp)},
-		OffTimes:   []int64{meta.OffTime},
-		Labels:     trace.CustomLabels,
+		Frames:        trace.Frames,
+		Timestamps:    []uint64{uint64(meta.Timestamp)},
+		OffTimes:      []int64{meta.OffTime},
+		Labels:        trace.CustomLabels,
+		GpuDurationNs: meta.GpuDurationNs,
 	}
 	return nil
 }

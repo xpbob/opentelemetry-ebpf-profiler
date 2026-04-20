@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/ebpf-profiler/internal/linux"
+	"go.opentelemetry.io/ebpf-profiler/support"
 	"go.opentelemetry.io/ebpf-profiler/tracer"
 )
 
@@ -77,11 +78,14 @@ type Config struct {
 	// CudaBinary 指定包含 USDT 探针的二进制文件路径（如共享库 .so）。
 	// 若为空，则默认使用 /proc/<pid>/exe。
 	CudaBinary             string        `mapstructure:"cuda_binary"`
-	// EnableTime 开启后，将 CPU 采样的采样次数转换为时间（ms），
-	// 转换规则：count * (1000 / SamplesPerSecond)。
+	// EnableTime 开启后，将 CPU 采样的采样次数转换为时间。
+	// 转换规则：count * (1e9 / SamplesPerSecond / NanoDivisor)。
 	// 在 EnableCuda 开启时默认为 true，可以手动关闭。
 	// 仅对 CPU 采样生效，对 USDT、uprobe 等无效。
 	EnableTime             *bool         `mapstructure:"enable_time"`
+	// TimeUnit 指定 enable-time 开启后的时间转化单位。
+	// 默认为 "ns"（纳秒），支持 "us"（微秒）、"ms"（毫秒）。
+	TimeUnit               support.TimeUnit `mapstructure:"time_unit"`
 	// HostProc 指定宿主机 /proc 的挂载路径。
 	// 物理机上运行时默认为 "/proc"；
 	// 容器内运行时，需要挂载宿主机的 /proc（如 -v /proc:/host/proc:ro），
@@ -97,6 +101,15 @@ func (cfg *Config) IsEnableTime() bool {
 		return *cfg.EnableTime
 	}
 	return cfg.EnableCuda
+}
+
+// GetTimeUnit 返回 TimeUnit 的实际值。
+// 如果未设置，默认返回 TimeUnitNS（纳秒）。
+func (cfg *Config) GetTimeUnit() support.TimeUnit {
+	if cfg.TimeUnit == "" {
+		return support.TimeUnitNS
+	}
+	return cfg.TimeUnit
 }
 
 // Validate validates the config.

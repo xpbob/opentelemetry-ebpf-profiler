@@ -199,7 +199,7 @@ func TestFunctionTableOrder(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 			require.NoError(t, err)
 			tree := make(samples.TraceEventsTree)
 			if len(tt.events) > 0 {
@@ -312,7 +312,7 @@ func TestProfileDuration(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 			require.NoError(t, err)
 
 			res, err := testGenerate(d, tt.tree, tt.name, "version")
@@ -334,7 +334,7 @@ func TestProfileDuration(t *testing.T) {
 }
 
 func TestGenerate_EmptyTree(t *testing.T) {
-	d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 	require.NoError(t, err)
 
 	tree := make(samples.TraceEventsTree)
@@ -360,7 +360,7 @@ func singleFrameTrace(ty libpf.FrameType, mapping libpf.FrameMapping,
 }
 
 func TestGenerate_SingleContainerSingleOrigin(t *testing.T) {
-	d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 	require.NoError(t, err)
 
 	funcName := "main"
@@ -424,7 +424,7 @@ func TestGenerate_SingleContainerSingleOrigin(t *testing.T) {
 }
 
 func TestGenerate_MultipleOriginsAndContainers(t *testing.T) {
-	d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 	require.NoError(t, err)
 
 	mapping := libpf.NewFrameMapping(libpf.FrameMappingData{
@@ -510,7 +510,7 @@ func TestGenerate_MultipleOriginsAndContainers(t *testing.T) {
 }
 
 func TestGenerate_StringAndFunctionTablePopulation(t *testing.T) {
-	d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 	require.NoError(t, err)
 
 	funcName := "myfunc"
@@ -577,7 +577,7 @@ func singleFrameNative(mappingFile libpf.FrameMappingFile, lineno libpf.AddressO
 }
 
 func TestGenerate_NativeFrame(t *testing.T) {
-	d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 	require.NoError(t, err)
 
 	filePath := libpf.Intern("/usr/lib/libexample.so")
@@ -776,7 +776,7 @@ func TestStackTableOrder(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 			require.NoError(t, err)
 			tree := make(samples.TraceEventsTree)
 			tree[samples.ResourceKey{}] = samples.ResourceToProfiles{Events: tt.events}
@@ -795,7 +795,7 @@ func TestStackTableOrder(t *testing.T) {
 }
 
 func TestGenerate_Validate(t *testing.T) {
-	d, err := New(100, nil, false)
+d, err := New(100, nil, false, support.TimeUnitNS)
 	require.NoError(t, err)
 
 	funcName := "myfunc"

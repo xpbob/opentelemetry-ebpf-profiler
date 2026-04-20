@@ -47,6 +47,7 @@ func NewOTLP(cfg *Config) (*OTLPReporter, error) {
 		cfg.SamplesPerSecond,
 		cfg.ExtraSampleAttrProd,
 		cfg.EnableTime,
+		cfg.TimeUnit,
 	)
 	if err != nil {
 		return nil, err

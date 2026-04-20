@@ -26,8 +26,11 @@ type pprofWriter struct {
 	// 采样频率（Hz）
 	samplesPerSecond int
 
-	// enableTime 开启后，将 CPU 采样的采样次数转换为时间（ms）
+	// enableTime 开启后，将 CPU 采样的采样次数转换为时间
 	enableTime bool
+
+	// timeUnit 时间转化单位
+	timeUnit support.TimeUnit
 
 	// 去重用的 map
 	functionMap  map[string]*pprofProfile.Function // funcKey -> Function
@@ -39,11 +42,12 @@ type pprofWriter struct {
 }
 
 // newPprofWriter 创建一个新的 pprofWriter 实例。
-func newPprofWriter(startTime time.Time, samplesPerSecond int, enableTime bool) *pprofWriter {
+func newPprofWriter(startTime time.Time, samplesPerSecond int, enableTime bool, timeUnit support.TimeUnit) *pprofWriter {
 	return &pprofWriter{
 		startTime:        startTime,
 		samplesPerSecond: samplesPerSecond,
 		enableTime:       enableTime,
+		timeUnit:         timeUnit,
 		functionMap:      make(map[string]*pprofProfile.Function),
 		locationMap:      make(map[string]*pprofProfile.Location),
 		nextFunctionID:   1,
@@ -114,7 +118,13 @@ func (w *pprofWriter) buildProfile(reportedEvents samples.TraceEventsTree, durat
 	}
 
 	// 遍历所有采样事件
-	for _, resourceToProfiles := range reportedEvents {
+	for resourceKey, resourceToProfiles := range reportedEvents {
+		// 为每个资源（进程）创建一个 ELF 符号解析器
+		var resolver *elfSymbolResolver
+		if resourceKey.PID > 0 {
+			resolver = newElfSymbolResolver(resourceKey.PID)
+		}
+
 		for origin, sampleToEvents := range resourceToProfiles.Events {
 			for sampleKey, traceEvents := range sampleToEvents {
 				if traceEvents == nil || len(traceEvents.Timestamps) == 0 {
@@ -122,7 +132,7 @@ func (w *pprofWriter) buildProfile(reportedEvents samples.TraceEventsTree, durat
 				}
 
 				// 构建 Location 列表（pprof 中栈帧从叶子到根排列）
-				locations := w.buildLocations(traceEvents.Frames)
+				locations := w.buildLocations(traceEvents.Frames, resolver)
 
 				// 采样次数
 				count := int64(len(traceEvents.Timestamps))
@@ -131,11 +141,13 @@ func (w *pprofWriter) buildProfile(reportedEvents samples.TraceEventsTree, durat
 				var cpuNanos int64
 				if w.enableTime && origin == support.TraceOriginSampling &&
 					w.samplesPerSecond > 0 {
-					// enableTime 开启且为 CPU 采样：将采样次数转换为时间（ms），
-					// 存储为纳秒以保持 pprof 格式一致性
+					// enableTime 开启且为 CPU 采样：将采样次数转换为纳秒
 					cpuNanos = count * (int64(time.Second) / int64(w.samplesPerSecond))
 				} else if origin == support.TraceOriginSampling && w.samplesPerSecond > 0 {
 					cpuNanos = count * (int64(time.Second) / int64(w.samplesPerSecond))
+				} else if origin == support.TraceOriginCuda {
+					// CUDA 的 GPU 执行时间以纳秒存储在 GpuDurationNs 中
+					cpuNanos = traceEvents.GpuDurationNs
 				}
 
 				sample := &pprofProfile.Sample{
@@ -171,7 +183,8 @@ func (w *pprofWriter) buildProfile(reportedEvents samples.TraceEventsTree, durat
 
 // buildLocations 将 eBPF 采集的栈帧转换为 pprof Location 列表。
 // eBPF 采集的栈帧顺序是从叶子到根，pprof 也是从叶子到根（index 0 = leaf）。
-func (w *pprofWriter) buildLocations(frames libpf.Frames) []*pprofProfile.Location {
+// resolver 可以为 nil，此时不进行本地 ELF 符号化。
+func (w *pprofWriter) buildLocations(frames libpf.Frames, resolver *elfSymbolResolver) []*pprofProfile.Location {
 	locations := make([]*pprofProfile.Location, 0, len(frames))
 
 	for _, frameHandle := range frames {
@@ -197,8 +210,19 @@ func (w *pprofWriter) buildLocations(frames libpf.Frames) []*pprofProfile.Locati
 			}
 		} else if frame.Mapping.Valid() {
 			mf := frame.Mapping.Value().File.Value()
-			funcName = fmt.Sprintf("0x%x", frame.AddressOrLineno)
-			fileName = mf.FileName.String()
+			mfName := mf.FileName.String()
+			fileName = mfName
+
+			// 尝试通过 ELF 符号表解析函数名
+			if resolver != nil && mfName != "" {
+				if resolved := resolver.resolve(mfName, uint64(frame.AddressOrLineno)); resolved != "" {
+					funcName = resolved
+				} else {
+					funcName = fmt.Sprintf("0x%x", frame.AddressOrLineno)
+				}
+			} else {
+				funcName = fmt.Sprintf("0x%x", frame.AddressOrLineno)
+			}
 		} else {
 			funcName = fmt.Sprintf("0x%x", frame.AddressOrLineno)
 			fileName = "[unknown]"

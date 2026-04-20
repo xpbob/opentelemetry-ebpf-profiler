@@ -18,6 +18,9 @@ type TraceEventMeta struct {
 	CPU            int
 	Origin         libpf.Origin
 	OffTime        int64
+	// GpuDurationNs 是 CUDA GPU kernel 的执行时间（纳秒）。
+	// 仅对 TraceOriginCuda 有效，其他 origin 为 0。
+	GpuDurationNs  int64
 	PID, TID       libpf.PID
 	SpanID         libpf.APMSpanID
 	TraceID        libpf.APMTraceID
@@ -29,6 +32,9 @@ type TraceEvents struct {
 	Frames     libpf.Frames
 	Timestamps []uint64 // in nanoseconds
 	OffTimes   []int64  // in nanoseconds
+	// GpuDurationNs 是 CUDA GPU kernel 的累计执行时间（纳秒）。
+	// 仅对 TraceOriginCuda 有效。
+	GpuDurationNs int64
 }
 
 // TraceEventsTree stores samples and their related metadata in a tree-like
