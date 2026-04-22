@@ -129,6 +129,7 @@ type EbpfTrace struct {
 	CudaCorrelationId uint64
 	CudaKernelStart   uint64
 	CudaKernelEnd     uint64
+	CudaDeviceId      uint64
 }
 
 type EbpfFrame []uint64

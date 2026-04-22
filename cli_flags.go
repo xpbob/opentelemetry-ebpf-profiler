@@ -101,7 +101,7 @@ var (
 		"Defaults to /proc (suitable for running directly on the host). " +
 		"Can also be set via HOST_PROC environment variable."
 	enableCudaHelp = "Enable CUDA USDT probe for GPU kernel correlation. " +
-		"Requires Linux 5.4+ kernel. Only effective in CPU sampling mode."
+		"Requires Linux 5.4+ kernel. Works with both CPU sampling and off-CPU profiling."
 	cudaBinaryHelp = "Path to the binary (e.g. shared library .so) containing the USDT probe " +
 		"parcagpu:cuda_correlation. If not specified, defaults to /proc/<pid>/exe."
 	enableTimeHelp = "Enable converting CPU sampling counts to time. " +

@@ -149,14 +149,15 @@ int usdt__kernel_executed(struct pt_regs *ctx)
   // 从 map 中读取参数配置
   u32 config_key = USDT_CONFIG_KERNEL_EXECUTED;
   UsdtArgsConfig *config = bpf_map_lookup_elem(&usdt_args_config, &config_key);
-  if (!config || config->num_args < 3) {
+  if (!config || config->num_args < 4) {
     return 0;
   }
 
-  // arg0 = start, arg1 = end, arg2 = correlationId
+  // arg0 = start, arg1 = end, arg2 = correlationId, arg3 = deviceId
   u64 start          = read_usdt_arg(ctx, &config->args[0]);
   u64 end            = read_usdt_arg(ctx, &config->args[1]);
   u64 correlation_id = read_usdt_arg(ctx, &config->args[2]);
+  u64 device_id      = read_usdt_arg(ctx, &config->args[3]);
 
   // 获取 per-CPU record 并初始化 trace
   PerCPURecord *record = get_pristine_per_cpu_record();
@@ -234,6 +235,27 @@ int usdt__kernel_executed(struct pt_regs *ctx)
 
     __builtin_memset(labels->labels[idx].val, 0, sizeof(labels->labels[idx].val));
     *(u64 *)labels->labels[idx].val = end;
+    labels->len = idx + 1;
+  }
+
+  // label 3: cuda_dev_id = deviceId（二进制 u64）
+  if (labels->len < MAX_CUSTOM_LABELS) {
+    u32 idx = labels->len;
+    __builtin_memset(labels->labels[idx].key, 0, sizeof(labels->labels[idx].key));
+    labels->labels[idx].key[0] = 'c';
+    labels->labels[idx].key[1] = 'u';
+    labels->labels[idx].key[2] = 'd';
+    labels->labels[idx].key[3] = 'a';
+    labels->labels[idx].key[4] = '_';
+    labels->labels[idx].key[5] = 'd';
+    labels->labels[idx].key[6] = 'e';
+    labels->labels[idx].key[7] = 'v';
+    labels->labels[idx].key[8] = '_';
+    labels->labels[idx].key[9] = 'i';
+    labels->labels[idx].key[10] = 'd';
+
+    __builtin_memset(labels->labels[idx].val, 0, sizeof(labels->labels[idx].val));
+    *(u64 *)labels->labels[idx].val = device_id;
     labels->len = idx + 1;
   }
 

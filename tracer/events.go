@@ -250,8 +250,8 @@ func (t *Tracer) startTraceEventMonitor(ctx context.Context,
 
 				// 对于 CUDA kernel_executed 事件，打印日志确认已到达用户态
 				if trace.Origin == support.TraceOriginCudaKernelExec {
-					log.Infof("[CUDA DEBUG] trace_events 收到 kernel_executed: pid=%d, tid=%d, correlationId=%d, start=%d, end=%d",
-						trace.PID, trace.TID, trace.CudaCorrelationId, trace.CudaKernelStart, trace.CudaKernelEnd)
+					log.Debugf("[CUDA DEBUG] trace_events 收到 kernel_executed: pid=%d, tid=%d, correlationId=%d, deviceId=%d, start=%d, end=%d",
+						trace.PID, trace.TID, trace.CudaCorrelationId, trace.CudaDeviceId, trace.CudaKernelStart, trace.CudaKernelEnd)
 				}
 
 				if minKTime == 0 || trace.KTime < minKTime {

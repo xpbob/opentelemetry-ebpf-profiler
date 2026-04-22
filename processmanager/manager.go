@@ -383,6 +383,8 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 
 	// 对于 CUDA origin 的 trace，从 custom_labels 中取出 cuda_name 和 cuda_corr_id，
 	// 暂存到 pendingCudaCorrelations map 中，等待 kernel_executed 触发时关联。
+	// 注意：不在这里预先插入 [CUDA] name 栈顶帧，因为 deviceId 要等 kernel_executed
+	// 到达后才能确定。栈顶帧会在匹配成功时再以 [GPU<deviceId>] name 形式插入。
 	if bpfTrace.Origin == support.TraceOriginCuda {
 		cudaNameKey := libpf.Intern("cuda_name")
 
@@ -395,17 +397,7 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 		// correlationId 已在 loadBpfTrace 中从原始字节直接解析到 EbpfTrace.CudaCorrelationId
 		correlationId := bpfTrace.CudaCorrelationId
 
-		// 插入 [CUDA] name 作为叶子帧
-		if cudaName != "" {
-			cudaFrame := libpf.Frame{
-				Type:         libpf.NativeFrame,
-				FunctionName: libpf.Intern("[CUDA] " + cudaName),
-			}
-			trace.Frames = slices.Insert(trace.Frames, 0, unique.Make(cudaFrame))
-		}
-
-		trace.Hash = traceutil.HashTrace(trace)
-		meta.APMServiceName = pm.maybeNotifyAPMAgent(bpfTrace, trace.Hash, 1)
+		meta.APMServiceName = pm.maybeNotifyAPMAgent(bpfTrace, libpf.TraceHash{}, 1)
 
 		// 先检查是否已有对应的 kernel_executed 在等待（kernel_executed 先到的情况）
 		if ke, ok := pm.pendingKernelExecuted[correlationId]; ok {
@@ -418,7 +410,7 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 				timeDiffMs = -timeDiffMs
 			}
 			if timeDiffMs > 200 {
-				log.Infof("[CUDA DEBUG] cuda_correlation 反向匹配超时跳过: correlationId=%d, cudaName=%q, timeDiffMs=%d",
+				log.Debugf("[CUDA DEBUG] cuda_correlation 反向匹配超时跳过: correlationId=%d, cudaName=%q, timeDiffMs=%d",
 					correlationId, cudaName, timeDiffMs)
 				// 超时不匹配，继续走正常的存入 pending 流程
 			} else {
@@ -428,8 +420,12 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 				if durationNs <= 0 {
 					durationNs = 1
 				}
-				log.Infof("[CUDA DEBUG] cuda_correlation 反向匹配成功: correlationId=%d, cudaName=%q, durationNs=%d, timeDiffMs=%d",
-					correlationId, cudaName, durationNs, timeDiffMs)
+				log.Debugf("[CUDA DEBUG] cuda_correlation 反向匹配成功: correlationId=%d, cudaName=%q, deviceId=%d, durationNs=%d, timeDiffMs=%d",
+					correlationId, cudaName, ke.deviceId, durationNs, timeDiffMs)
+
+				// 在栈顶插入 [GPU<deviceId>] name 作为叶子帧
+				insertCudaLeafFrame(trace, cudaName, ke.deviceId)
+				trace.Hash = traceutil.HashTrace(trace)
 
 				meta.GpuDurationNs = durationNs
 				if err := pm.traceReporter.ReportTraceEvent(trace, meta); err != nil {
@@ -448,18 +444,19 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 			timestampMs: corrTimestampMs,
 			cudaName:    cudaName,
 		}
-		log.Infof("[CUDA DEBUG] cuda_correlation 存入: correlationId=%d, cudaName=%q, pid=%d, tid=%d, timestampMs=%d, pendingCount=%d",
+		log.Debugf("[CUDA DEBUG] cuda_correlation 存入: correlationId=%d, cudaName=%q, pid=%d, tid=%d, timestampMs=%d, pendingCount=%d",
 			correlationId, cudaName, bpfTrace.PID, bpfTrace.TID, corrTimestampMs, len(pm.pendingCudaCorrelations))
 		return
 	}
 
 	// 对于 CUDA kernel_executed origin 的 trace，从 EbpfTrace 的专用字段中提取
-	// correlationId、start、end（已在 loadBpfTrace 中从原始字节直接解析），
+	// correlationId、start、end、deviceId（已在 loadBpfTrace 中从原始字节直接解析），
 	// 然后根据 correlationId 关联 pending correlation。
 	if bpfTrace.Origin == support.TraceOriginCudaKernelExec {
 		correlationId := bpfTrace.CudaCorrelationId
 		start := bpfTrace.CudaKernelStart
 		end := bpfTrace.CudaKernelEnd
+		deviceId := bpfTrace.CudaDeviceId
 
 		// 查找匹配的 pending correlation
 		pending, ok := pm.pendingCudaCorrelations[correlationId]
@@ -470,10 +467,11 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 			pm.pendingKernelExecuted[correlationId] = &pendingKernelExecuted{
 				start:       start,
 				end:         end,
+				deviceId:    deviceId,
 				timestampMs: keTimestampMs,
 			}
-			log.Infof("[CUDA DEBUG] kernel_executed 暂存等待反向匹配: correlationId=%d, start=%d, end=%d, pendingKECount=%d",
-				correlationId, start, end, len(pm.pendingKernelExecuted))
+			log.Debugf("[CUDA DEBUG] kernel_executed 暂存等待反向匹配: correlationId=%d, deviceId=%d, start=%d, end=%d, pendingKECount=%d",
+				correlationId, deviceId, start, end, len(pm.pendingKernelExecuted))
 			return
 		}
 
@@ -487,12 +485,14 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 		if durationNs <= 0 {
 			durationNs = 1
 		}
-		log.Infof("[CUDA DEBUG] kernel_executed 匹配成功: correlationId=%d, cudaName=%q, durationNs=%d, pendingCount=%d",
-			correlationId, pending.cudaName, durationNs, len(pm.pendingCudaCorrelations))
+		log.Debugf("[CUDA DEBUG] kernel_executed 匹配成功: correlationId=%d, cudaName=%q, deviceId=%d, durationNs=%d, pendingCount=%d",
+			correlationId, pending.cudaName, deviceId, durationNs, len(pm.pendingCudaCorrelations))
 
-		// 使用 pending correlation 的栈帧和元数据，将 durationNs 存入 meta
+		// 使用 pending correlation 的栈帧和元数据，在栈顶插入 [GPU<deviceId>] name
 		pendingTrace := pending.trace
 		pendingMeta := pending.meta
+		insertCudaLeafFrame(pendingTrace, pending.cudaName, deviceId)
+		pendingTrace.Hash = traceutil.HashTrace(pendingTrace)
 		pendingMeta.GpuDurationNs = durationNs
 
 		if err := pm.traceReporter.ReportTraceEvent(pendingTrace, pendingMeta); err != nil {
@@ -515,7 +515,7 @@ func (pm *ProcessManager) HandleTrace(bpfTrace *libpf.EbpfTrace) {
 func (pm *ProcessManager) FlushPendingCudaCorrelations() {
 	// 清理残留的 pendingKernelExecuted（这些是 kernel_executed 先到但始终没等到 cuda_correlation 的）
 	if len(pm.pendingKernelExecuted) > 0 {
-		log.Infof("[CUDA DEBUG] FlushPending 清理残留 pendingKernelExecuted: count=%d", len(pm.pendingKernelExecuted))
+		log.Debugf("[CUDA DEBUG] FlushPending 清理残留 pendingKernelExecuted: count=%d", len(pm.pendingKernelExecuted))
 		for corrId := range pm.pendingKernelExecuted {
 			delete(pm.pendingKernelExecuted, corrId)
 		}
@@ -532,7 +532,7 @@ func (pm *ProcessManager) FlushPendingCudaCorrelations() {
 		}
 		durationNs := durationMs * 1_000_000
 
-		log.Infof("[CUDA DEBUG] FlushPending unfinished: correlationId=%d, cudaName=%q, timestampMs=%d, nowMs=%d, durationMs=%d, durationNs=%d",
+		log.Debugf("[CUDA DEBUG] FlushPending unfinished: correlationId=%d, cudaName=%q, timestampMs=%d, nowMs=%d, durationMs=%d, durationNs=%d",
 			corrId, pending.cudaName, pending.timestampMs, nowMs, durationMs, durationNs)
 
 		// 在栈顶（Frames[0]）插入 [CUDA] unfinished 帧
@@ -558,4 +558,17 @@ func (pm *ProcessManager) FlushPendingCudaCorrelations() {
 // PendingCudaCorrelationCount 返回当前未匹配的 CUDA correlation 数量。
 func (pm *ProcessManager) PendingCudaCorrelationCount() int {
 	return len(pm.pendingCudaCorrelations)
+}
+
+// insertCudaLeafFrame 在 trace 栈顶（Frames[0]）插入形如 [GPU<deviceId>] name 的叶子帧。
+// 当 cudaName 为空时不插入。
+func insertCudaLeafFrame(trace *libpf.Trace, cudaName string, deviceId uint64) {
+	if cudaName == "" {
+		return
+	}
+	cudaFrame := libpf.Frame{
+		Type:         libpf.NativeFrame,
+		FunctionName: libpf.Intern(fmt.Sprintf("[GPU%d] %s", deviceId, cudaName)),
+	}
+	trace.Frames = slices.Insert(trace.Frames, 0, unique.Make(cudaFrame))
 }

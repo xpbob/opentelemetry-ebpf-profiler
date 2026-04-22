@@ -61,6 +61,8 @@ type pendingKernelExecuted struct {
 	start uint64
 	// end 是 GPU kernel 执行的结束时间戳（纳秒）。
 	end uint64
+	// deviceId 是 GPU 设备 ID，用于构造 [GPU<deviceId>] 栈顶帧。
+	deviceId uint64
 	// timestampMs 是 kernel_executed 到达时的 13 位毫秒时间戳，用于超时清理。
 	timestampMs int64
 }

@@ -1168,6 +1168,9 @@ func (t *Tracer) loadBpfTrace(raw []byte, cpu int) (*libpf.EbpfTrace, error) {
 			case "cuda_end":
 				trace.CudaKernelEnd = nativeEndian.Uint64(lbl.Val[:8])
 				continue
+			case "cuda_dev_id":
+				trace.CudaDeviceId = nativeEndian.Uint64(lbl.Val[:8])
+				continue
 			}
 
 			val := goString(lbl.Val[:])

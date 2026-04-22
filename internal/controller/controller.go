@@ -145,7 +145,7 @@ func (c *Controller) Start(ctx context.Context) error {
 		log.Info("Attached probes")
 	}
 
-	// CUDA USDT 探针仅在 CPU 采样模式下生效
+	// CUDA USDT 探针在 CPU 采样和 off-CPU 采样模式下均可生效
 	if c.config.EnableCuda {
 		if err := trc.StartCudaProfiling(c.config.TargetPID, c.config.CudaBinary); err != nil {
 			return fmt.Errorf("failed to start CUDA USDT profiling: %v", err)
